@@ -1,0 +1,237 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body { 
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  background: linear-gradient(135deg, #1a1a1a 0%, #0d0d0d 100%);
+  color: #e0e0e0;
+  min-height: 100vh;
+  padding: 2rem;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+h1 {
+  text-align: center;
+  font-size: 3rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+  background: linear-gradient(135deg, #d4af37 0%, #f4d03f 50%, #d4af37 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  text-shadow: 0 0 30px rgba(212, 175, 55, 0.3);
+}
+
+.subtitle {
+  text-align: center;
+  color: #999;
+  margin-bottom: 2rem;
+  font-size: 1.1rem;
+}
+
+.search { 
+  display: flex; 
+  gap: 12px; 
+  margin-bottom: 3rem;
+  max-width: 700px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+input { 
+  flex: 1; 
+  padding: 14px 20px;
+  background: #2a2a2a;
+  border: 2px solid #3a3a3a;
+  border-radius: 8px;
+  color: #e0e0e0;
+  font-size: 1rem;
+  transition: all 0.3s ease;
+}
+
+input:focus {
+  outline: none;
+  border-color: #d4af37;
+  box-shadow: 0 0 20px rgba(212, 175, 55, 0.2);
+}
+
+input::placeholder {
+  color: #666;
+}
+
+button {
+  padding: 14px 32px;
+  background: linear-gradient(135deg, #d4af37 0%, #f4d03f 100%);
+  border: none;
+  border-radius: 8px;
+  color: #000;
+  font-weight: 600;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 25px rgba(212, 175, 55, 0.4);
+}
+
+button:active {
+  transform: translateY(0);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.stats {
+  text-align: center;
+  margin-bottom: 2rem;
+  padding: 1rem;
+  background: rgba(212, 175, 55, 0.1);
+  border: 1px solid rgba(212, 175, 55, 0.3);
+  border-radius: 8px;
+  color: #d4af37;
+  font-weight: 500;
+}
+
+.results-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+  gap: 1.5rem;
+  margin-top: 2rem;
+}
+
+.result { 
+  background: #1e1e1e;
+  border: 1px solid #2a2a2a;
+  border-radius: 12px;
+  padding: 1.5rem;
+  transition: all 0.3s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.result::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #d4af37 0%, #f4d03f 100%);
+}
+
+.result:hover {
+  transform: translateY(-4px);
+  border-color: #d4af37;
+  box-shadow: 0 12px 40px rgba(212, 175, 55, 0.2);
+}
+
+.result h3 {
+  color: #d4af37;
+  font-size: 1.3rem;
+  margin-bottom: 1rem;
+  line-height: 1.4;
+}
+
+.result h3 a {
+  color: #d4af37;
+  text-decoration: none;
+  transition: color 0.3s ease;
+}
+
+.result h3 a:hover {
+  color: #f4d03f;
+}
+
+.result-section {
+  margin-bottom: 1rem;
+}
+
+.result-section h4 {
+  color: #999;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 0.5rem;
+  font-weight: 500;
+}
+
+.result-section p, .result-section ul {
+  color: #e0e0e0;
+  line-height: 1.6;
+}
+
+.result-section ul {
+  list-style: none;
+  padding-left: 0;
+}
+
+.result-section li {
+  padding: 0.3rem 0;
+  padding-left: 1.2rem;
+  position: relative;
+}
+
+.result-section li::before {
+  content: '◆';
+  position: absolute;
+  left: 0;
+  color: #d4af37;
+}
+
+.published-date {
+  color: #666;
+  font-size: 0.9rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #2a2a2a;
+}
+
+.loading {
+  text-align: center;
+  color: #d4af37;
+  font-size: 1.2rem;
+  padding: 3rem;
+}
+
+.error {
+  background: rgba(220, 38, 38, 0.1);
+  border: 1px solid rgba(220, 38, 38, 0.3);
+  color: #ff6b6b;
+  padding: 1rem;
+  border-radius: 8px;
+  margin-bottom: 2rem;
+  text-align: center;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1a1a1a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d4af37;
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #f4d03f;
+}
+

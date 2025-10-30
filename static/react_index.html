@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Prize Scout (React)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body { font-family: Arial, sans-serif; max-width: 900px; margin: 2rem auto; }
+      .result { border: 1px solid #ddd; padding: 1rem; margin-bottom: 1rem; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script>
+      const e = React.createElement;
+
+      function App(){
+        const [q, setQ] = React.useState('giveaway');
+        const [loading, setLoading] = React.useState(false);
+        const [results, setResults] = React.useState([]);
+
+        async function doSearch(){
+          setLoading(true); setResults([]);
+          try{
+            const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+            const data = await res.json();
+            setResults(data.results || []);
+          }catch(err){
+            console.error(err);
+          }finally{ setLoading(false) }
+        }
+
+        return e('div', {},
+          e('h1', {}, 'Prize Scout'),
+          e('p', {}, 'Search YouTube for giveaways'),
+          e('div', {}, e('input', { value: q, onChange: e=>setQ(e.target.value)}), e('button', { onClick: doSearch }, 'Search')),
+          loading ? e('p', {}, 'Searching...') : null,
+          results.length === 0 && !loading ? e('p', {}, 'No giveaways found.') : null,
+          results.map(r => e('div', { key: r.video_id, className: 'result' },
+            e('h3', {}, e('a', { href: r.video_url, target: '_blank' }, r.video_title || r.video_url)),
+            e('p', {}, e('strong', {}, 'Prizes: '), r.prizes || 'N/A'),
+            e('p', {}, e('strong', {}, 'Deadline: '), r.deadline || 'N/A'),
+            e('p', {}, e('strong', {}, 'How to enter: '), r.howto || 'N/A')
+          ))
+        )
+      }
+
+      ReactDOM.createRoot(document.getElementById('root')).render(e(App))
+    </script>
+  </body>
+</html>
