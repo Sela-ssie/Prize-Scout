@@ -1,6 +1,6 @@
 # Prize Scout
 
-Small project that searches YouTube videos and descriptions for giveaways and extracts giveaway details (deadline, prizes, how to enter) and returns structured results.
+Project that searches YouTube videos and descriptions for giveaways and extracts giveaway details (deadline, prizes, how to enter) and returns structured results.
 
 This repo contains a minimal FastAPI backend and a static frontend to query the API.
 
