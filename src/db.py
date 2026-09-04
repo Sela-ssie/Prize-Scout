@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime, timezone
 from typing import Optional
@@ -14,17 +15,28 @@ def _utcnow() -> datetime:
 class Video(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     video_id: str = Field(unique=True, index=True)
+    channel_id: Optional[str] = Field(default=None, index=True)
     title: Optional[str] = None
     url: Optional[str] = None
+    published_at: Optional[str] = None
+    # Never discard the input. Without the raw text every extractor change costs API
+    # quota to re-evaluate, which is the single most expensive omission in the prototype.
+    raw_description: Optional[str] = None
+    # YouTube's terms require cached API data to be refreshed or dropped on a ~30-day
+    # cycle; this is the column that makes stale rows findable.
     fetched_at: datetime = Field(default_factory=_utcnow)
 
 
 class Giveaway(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     video_id: str = Field(unique=True, index=True)
-    prizes: Optional[str] = None
-    deadline: Optional[str] = None
+    prizes: Optional[str] = None            # human-readable summary, for display
+    prizes_json: Optional[str] = None       # structured [{item, value_usd}]
+    deadline: Optional[str] = None          # ISO 8601, timezone-aware
     howto: Optional[str] = None
+    # The only ranking signal in the system. The prototype computed it and threw it away.
+    confidence: Optional[float] = Field(default=None, index=True)
+    extractor_version: Optional[str] = None
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -96,8 +108,11 @@ def save_giveaway_sync(engine, video: dict, extracted: dict):
         if v is None:
             v = Video(video_id=video_id)
             session.add(v)
+        v.channel_id = video.get("channel_id")
         v.title = video.get("title")
         v.url = video.get("url")
+        v.published_at = video.get("published_at")
+        v.raw_description = video.get("description")
         v.fetched_at = _utcnow()
 
         g = session.exec(select(Giveaway).where(Giveaway.video_id == video_id)).first()
@@ -105,8 +120,12 @@ def save_giveaway_sync(engine, video: dict, extracted: dict):
             g = Giveaway(video_id=video_id)
             session.add(g)
         g.prizes = extracted.get("prizes")
+        structured = extracted.get("prizes_structured")
+        g.prizes_json = json.dumps(structured) if structured is not None else None
         g.deadline = extracted.get("deadline")
         g.howto = extracted.get("howto")
+        g.confidence = extracted.get("confidence")
+        g.extractor_version = extracted.get("extractor_version")
         g.updated_at = _utcnow()
 
         session.commit()

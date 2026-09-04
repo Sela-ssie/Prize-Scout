@@ -52,9 +52,10 @@ class YouTubeClient:
                     title = item["snippet"]["title"]
                     published_at = item["snippet"].get("publishedAt", "")
                     all_videos.append({
-                        "id": vid, 
-                        "title": title, 
-                        "published_at": published_at
+                        "id": vid,
+                        "channel_id": item["snippet"].get("channelId"),
+                        "title": title,
+                        "published_at": published_at,
                     })
                     all_ids.append(vid)
                 

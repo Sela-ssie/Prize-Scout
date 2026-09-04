@@ -2,6 +2,7 @@ from fastapi import APIRouter, Query
 from .youtube_client import YouTubeClient
 from .extractor import extract_giveaways_from_description
 from typing import List
+import json
 import os
 from . import db
 from concurrent.futures import ThreadPoolExecutor
@@ -38,7 +39,7 @@ async def search(q: str = Query(..., min_length=1), max_results: int = 50):
             break
             
         desc = v.get("description", "")
-        extracted = extract_giveaways_from_description(desc)
+        extracted = extract_giveaways_from_description(desc, published_at=v.get("published_at"))
         if extracted:
             # attach video link and title
             extracted["video_title"] = v.get("title")
@@ -46,15 +47,20 @@ async def search(q: str = Query(..., min_length=1), max_results: int = 50):
             extracted["video_url"] = f"https://www.youtube.com/watch?v={v.get('id')}"
             extracted["published_at"] = v.get("published_at")  # Add published date
             
-            # Remove confidence from response (internal use only)
-            confidence = extracted.pop("confidence", None)
-            
             results.append(extracted)
 
             # persist if DB available (run in thread)
             if sync_engine is not None:
                 try:
-                    video_row = {"id": v.get('id'), "title": v.get('title'), "url": extracted["video_url"]}
+                    video_row = {
+                        "id": v.get("id"),
+                        "channel_id": v.get("channel_id"),
+                        "title": v.get("title"),
+                        "url": extracted["video_url"],
+                        "published_at": v.get("published_at"),
+                        # Always persist the raw text. See CLAUDE.md.
+                        "description": desc,
+                    }
 
                     loop = asyncio.get_running_loop()
                     # schedule sync save to run in threadpool
@@ -76,7 +82,7 @@ def list_giveaways():
     from .db import Giveaway
 
     with db.get_sync_session(sync_engine) as session:
-        stmt = select(Giveaway)
+        stmt = select(Giveaway).order_by(Giveaway.confidence.desc())
         rows = session.exec(stmt).all()
         results = []
         for r in rows:
@@ -84,7 +90,10 @@ def list_giveaways():
                 "id": r.id,
                 "video_id": r.video_id,
                 "prizes": r.prizes,
+                "prizes_structured": json.loads(r.prizes_json) if r.prizes_json else [],
                 "deadline": r.deadline,
                 "howto": r.howto,
+                "confidence": r.confidence,
+                "extractor_version": r.extractor_version,
             })
         return {"results": results}
