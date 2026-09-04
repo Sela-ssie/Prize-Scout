@@ -19,7 +19,7 @@ python -m venv .venv; .\.venv\Scripts\Activate.ps1; pip install -r requirements.
 uvicorn src.main:app --reload
 ```
 
-4. Open `static/index.html` in your browser and try a search.
+4. Run the frontend (below) and try a search.
 
 Frontend (development with Vite)
 
@@ -67,3 +67,6 @@ Saved giveaways endpoint
 Notes
 - The YouTube Data API requires an API key set in `YOUTUBE_API_KEY`.
 - This is an initial scaffold; extractor heuristics are intentionally conservative.
+- See `CLAUDE.md` for the quota constraint, architecture direction, and phase plan.
+- `prizes.db` is not tracked in git. A database written before Phase 0 uses an
+  outdated schema and will be rejected at startup with instructions.
