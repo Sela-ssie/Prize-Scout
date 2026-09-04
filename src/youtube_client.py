@@ -1,7 +1,7 @@
 import httpx
 import os
 from typing import List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 class YouTubeClient:
     def __init__(self, api_key: Optional[str] = None):
@@ -13,7 +13,7 @@ class YouTubeClient:
             raise RuntimeError("YOUTUBE_API_KEY not set")
 
         # Calculate date for filtering (3 months ago by default)
-        published_after = datetime.utcnow() - timedelta(days=30 * months_back)
+        published_after = datetime.now(timezone.utc) - timedelta(days=30 * months_back)
         published_after_str = published_after.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         all_videos = []

@@ -9,7 +9,7 @@ def test_happy_path():
     res = extract_giveaways_from_description(text)
     assert res is not None
     assert 'Nintendo' in (res['prizes'] or '') or 'win' in (res['prizes'] or '')
-    assert 'September' in (res['deadline'] or '')
+    assert '2025-09-30' in (res['deadline'] or '')
     assert 'subscribe' in (res['howto'] or '').lower()
 
 
@@ -20,15 +20,12 @@ def test_no_giveaway():
 
 
 def test_dateparser_behavior():
-    # this test is only meaningful if dateparser is installed
-    try:
-        import dateparser  # type: ignore
-    except Exception:
-        import pytest
-
-        pytest.skip("dateparser not installed; skipping date parsing test")
-
-    text = "Enter to win! Ends on October 15, 2025."
+    # dateparser is a hard requirement, not an optional extra. This test used to skip
+    # itself when it was missing, which is how the missing dependency went unnoticed.
+    text = (
+        "Enter to win a PlayStation 5! Subscribe and comment to enter. "
+        "The giveaway ends on October 15, 2025."
+    )
     res = extract_giveaways_from_description(text)
     assert res is not None
     assert res.get('deadline') is not None
