@@ -58,3 +58,37 @@ def test_outdated_schema_is_rejected(tmp_path):
 
     with pytest.raises(RuntimeError, match="outdated schema"):
         db.create_db_and_tables(f"sqlite:///{path}")
+
+
+def test_raw_description_and_confidence_are_persisted(tmp_path):
+    """The prototype stored neither, so the corpus was unusable and ranking impossible."""
+    engine = _engine(tmp_path)
+    video = {
+        "id": "vid1",
+        "channel_id": "UC123",
+        "title": "Giveaway",
+        "url": "https://y/vid1",
+        "published_at": "2026-01-01T00:00:00Z",
+        "description": "Full raw description text that must survive the round trip.",
+    }
+    extracted = {
+        "prizes": "PlayStation 5 ($499)",
+        "prizes_structured": [{"item": "PlayStation 5", "value_usd": 499.0}],
+        "deadline": "2026-12-01T00:00:00+00:00",
+        "howto": "Subscribe and comment.",
+        "confidence": 0.87,
+        "extractor_version": "2.0.0",
+    }
+    db.save_giveaway_sync(engine, video, extracted)
+
+    with db.get_sync_session(engine) as session:
+        v = session.exec(select(db.Video)).one()
+        g = session.exec(select(db.Giveaway)).one()
+
+    assert v.raw_description == video["description"]
+    assert v.channel_id == "UC123"
+    assert v.published_at == "2026-01-01T00:00:00Z"
+    assert g.confidence == 0.87
+    assert g.extractor_version == "2.0.0"
+    import json as _json
+    assert _json.loads(g.prizes_json) == extracted["prizes_structured"]
