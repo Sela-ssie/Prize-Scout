@@ -23,7 +23,7 @@ from typing import Dict, List, Optional
 import dateparser
 from dateparser.search import search_dates
 
-EXTRACTOR_VERSION = "2.0.0"
+EXTRACTOR_VERSION = "2.1.0"
 
 _WEIGHTS_PATH = Path(__file__).resolve().parents[1] / "extractor_weights.json"
 
@@ -48,13 +48,32 @@ DEADLINE_KEYWORDS = [
     "expiry", "last day", "winner announced", "drawn on", "draw date", "before",
 ]
 HOWTO_KEYWORDS = [
-    "how to enter", "to enter", "enter by", "steps to enter", "subscribe", "like",
-    "comment", "follow", "retweet", "share", "tag",
+    "how to enter", "to enter", "enter by", "steps to enter", "subscribe", "subscribing",
+    "like", "liking", "comment", "commenting", "follow", "following", "retweet",
+    "retweeting", "share", "sharing", "tag", "tagging", "participate", "participating",
 ]
 
 NEGATION_PATTERNS = [
     r"\bno\s+giveaway", r"\bnot\s+a\s+giveaway", r"\bno\s+giveaways\b", r"\bno\s+prize",
     r"\bfake\s+giveaway", r"\bgiveaway\s+scam", r"\bthis\s+is\s+not\s+a\s+contest",
+    r"\bnot\s+(?:running|hosting|doing|holding)\s+(?:a|any|this)?\s*(?:giveaway|contest|sweepstakes)",
+    r"\bnot\s+giving\s+(?:anything|any\s+\w+)?\s*away",
+    r"\bnot\s+affiliated\s+with\b",
+    r"\bimpersonating\b",
+]
+
+# A giveaway that has already closed is not a live giveaway. Detecting this is worth more
+# than any regex tweak: it was the single highest-confidence false positive in evaluation.
+CLOSED_GIVEAWAY_PATTERNS = [
+    r"\bgiveaway\s+(?:has\s+)?(?:ended|closed|finished|concluded)\b",
+    r"\bgiveaway\s+is\s+(?:now\s+)?(?:over|closed|ended|finished)\b",
+    r"\bentries\s+(?:are\s+)?(?:now\s+)?closed\b",
+    r"\bcontest\s+(?:has\s+)?(?:ended|closed)\b",
+    r"\bwinner[s]?\s+(?:has|have|was|were)\s+(?:already\s+)?(?:been\s+)?(?:announced|picked|chosen|selected|contacted|drawn)\b",
+    r"\bwinner[s]?\s+has\s+already\s+been\b",
+    r"\bcongratulations\s+to\s+(?:the|our|my)\s+winner",
+    r"\bno\s+longer\s+accepting\s+entries\b",
+    r"\bthis\s+giveaway\s+is\s+over\b",
 ]
 MUSIC_VIDEO_INDICATORS = [
     "official video", "official lyric", "music video", "official audio", "lyric video",
@@ -78,9 +97,49 @@ ENTRY_RE = _boundary_re(ENTRY_KEYWORDS)
 DEADLINE_RE = _boundary_re(DEADLINE_KEYWORDS)
 HOWTO_RE = _boundary_re(HOWTO_KEYWORDS)
 NEGATION_RE = re.compile("|".join(NEGATION_PATTERNS), re.IGNORECASE)
+CLOSED_RE = re.compile("|".join(CLOSED_GIVEAWAY_PATTERNS), re.IGNORECASE)
 MUSIC_RE = _boundary_re(MUSIC_VIDEO_INDICATORS)
 NEAR_NEGATION_RE = _boundary_re(["no", "not", "fake", "never", "without"])
-ACTION_RE = _boundary_re(["subscribe", "like", "comment", "follow", "retweet", "share", "tag", "join"])
+ACTION_RE = _boundary_re([
+    "subscribe", "subscribing", "like", "liking", "comment", "commenting", "follow",
+    "following", "retweet", "share", "sharing", "tag", "tagging", "join", "joining",
+])
+
+# An entry instruction is an imperative: the action verb opens a clause. "Comment your
+# favourite game below" is one; "timestamps are in the pinned comment" is not. Without
+# this, any description mentioning its own comments section looked like entry steps.
+_CLAUSE_OPENERS = {"to", "and", "or", "just", "please", "simply", "is", "do", "must", "then",
+                    "also", "you", "by", "through", "start"}
+_CLAUSE_BOUNDARY_RE = re.compile(r"(?:^|[.!?:;,\n\-–—•]|\d[\.\)⃣]|️⃣|✔|✅|👉)\s*$")
+
+
+def _is_imperative_action(segment: str, start: int) -> bool:
+    head = segment[:start]
+    if _CLAUSE_BOUNDARY_RE.search(head):
+        return True
+    words = re.findall(r"[A-Za-z']+", head)
+    return bool(words) and words[-1].lower() in _CLAUSE_OPENERS
+
+
+# Distinguishes offering a giveaway from talking about one. Meta videos - countdowns,
+# reactions, winner interviews - use the same vocabulary as the real thing.
+FIRST_PERSON_OFFER_RE = re.compile(
+    r"\b(?:i|we)\s*(?:'m|'re|\s+am|\s+are)?\s+(?:giving\s+away|giveaway|hosting|running|doing|holding)\b"
+    r"|\bgiving\s+away\b(?=[^.!?]*\b(?:to\s+(?:one|two|three|a|you)|winner|subscriber|viewer)\b)"
+    r"|\benter\s+to\s+win\b|\bhow\s+to\s+enter\b|\bto\s+enter\b"
+    r"|\bwin\s+(?:a|an|this|the|one)\b"
+    r"|\bi\s+(?:will|'ll)\s+(?:pick|choose|select|announce|draw)\b"
+    r"|\bwinners?\s+will\s+be\b|\bwinners?\s+drawn\b|\bentries\s+close\b",
+    re.IGNORECASE,
+)
+META_DISCUSSION_RE = re.compile(
+    r"\breacting\s+to\b|\breaction\s+to\b|\bcountdown\b|\btop\s+\d+\b"
+    r"|\bwho\s+won\b|\bhave\s+been\s+asking\b|\bwhat\s+(?:really\s+)?happens\s+when\b"
+    r"|\b(?:their|his|her|another|other)\s+(?:own\s+)?(?:giveaway|contest|channel)\b"
+    r"|\bthis\s+creator\b|\blast\s+year\b|\bi\s+sat\s+down\s+with\b"
+    r"|\bcommentary\s+and\s+analysis\b|\boriginal\s+video\b",
+    re.IGNORECASE,
+)
 MULTI_STEP_RE = re.compile(r"(\b(?:and|then)\b|[1-9][⃣\.\)]|[1-9]️?⃣|✔|✅|\n\s*[-*•])", re.IGNORECASE)
 
 # --------------------------------------------------------------------------------------
@@ -154,6 +213,17 @@ _DATEPARSER_SETTINGS = {
     "PREFER_DATES_FROM": "future",
 }
 MAX_DEADLINE_HORIZON = timedelta(days=730)
+
+_DATEISH_RE = re.compile(
+    r"\d{1,4}[/-]\d{1,2}"
+    r"|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*\d"
+    r"|\d\s*(?:st|nd|rd|th)?\s+(?:of\s+)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
+    r"|\btoday\b|\btomorrow\b|\bmidnight\b"
+    r"|\bnext\s+(?:week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
+    r"|\bin\s+\d+\s+(?:days?|weeks?|hours?)\b"
+    r"|\bend\s+of\s+(?:the\s+)?(?:month|week|year)\b",
+    re.IGNORECASE,
+)
 
 _TOKEN_RE = re.compile(r"\S+")
 _WORD_RE = re.compile(r"[^\W\d_]{2,}", re.UNICODE)
@@ -281,6 +351,18 @@ def _segments(text: str) -> List[str]:
     return parts
 
 
+# "I have a spare Switch and I want one of you to have it" announces a prize without
+# using any prize vocabulary. Kept deliberately narrow: a bare "I have an iPhone" must
+# not become a prize.
+OFFER_CUE_RE = re.compile(
+    r"\bup\s+for\s+grabs\b"
+    r"|\bprizes?\s+(?:is|are|include[sd]?|will\s+be)\b"
+    r"|\b(?:i|we)\s+(?:have|got|am\s+giving|are\s+giving)\b[^.!?]{0,90}"
+    r"\b(?:one\s+of\s+you|to\s+you|for\s+one\s+of\s+you|to\s+have\s+it|to\s+give\s+away|away)\b",
+    re.IGNORECASE,
+)
+
+
 def _prize_candidates(text: str) -> List[str]:
     out = []
     for seg in _segments(text):
@@ -288,7 +370,7 @@ def _prize_candidates(text: str) -> List[str]:
             continue
         if NEAR_NEGATION_RE.search(seg) and PRIZE_RE.search(seg):
             continue
-        if PRIZE_RE.search(seg) or STRONG_PHRASE_RE.search(seg):
+        if PRIZE_RE.search(seg) or STRONG_PHRASE_RE.search(seg) or OFFER_CUE_RE.search(seg):
             out.append(seg)
     return out
 
@@ -415,8 +497,10 @@ def find_first_date(text: str) -> Optional[datetime]:
                 return parsed
     found = search_dates(text, settings=_DATEPARSER_SETTINGS)
     if found:
-        dt = found[0][1]
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        for matched, dt in found:
+            if not _DATEISH_RE.search(matched):
+                continue  # "three past winners" is not a date
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     return None
 
 
@@ -461,7 +545,10 @@ def find_howto(text: str) -> Optional[str]:
     for seg in _segments(text):
         if is_tag_dump(seg):
             continue
-        if HOWTO_RE.search(seg) and (ACTION_RE.search(seg) or ENTRY_RE.search(seg)):
+        if not HOWTO_RE.search(seg):
+            continue
+        imperative = any(_is_imperative_action(seg, m.start()) for m in ACTION_RE.finditer(seg))
+        if imperative or ENTRY_RE.search(seg):
             collected.append(_tidy(seg))
     if not collected:
         return None
@@ -477,9 +564,11 @@ DEFAULT_WEIGHTS = {
     "threshold": 0.5,
     "calibrated": False,
     "weights": {
-        "strong_keyword": 1.6,
-        "strong_phrase": 1.5,
-        "entry_keyword": 0.9,
+        "strong_keyword": 1.0,
+        "strong_phrase": 1.1,
+        "entry_keyword": 0.5,
+        "first_person_offer": 1.8,
+        "meta_discussion": -2.2,
         "prize_with_value": 1.4,
         "prize_item": 0.9,
         "has_deadline": 1.1,
@@ -536,6 +625,8 @@ def compute_features(
         "music_video": 1.0 if MUSIC_RE.search(text[:300]) else 0.0,
         "short_text": 1.0 if len(text) < 120 else 0.0,
         "no_fields": 1.0 if not (prizes or deadline or howto) else 0.0,
+        "first_person_offer": 1.0 if FIRST_PERSON_OFFER_RE.search(text) else 0.0,
+        "meta_discussion": 1.0 if META_DISCUSSION_RE.search(text) else 0.0,
         "hashtag_ratio": min(1.0, text.count("#") / len(tokens)),
     }
 
@@ -583,6 +674,9 @@ def extract(
         return result
     if NEGATION_RE.search(text):
         result["rejected_because"] = "negation"
+        return result
+    if CLOSED_RE.search(text):
+        result["rejected_because"] = "already_closed"
         return result
     if MUSIC_RE.search(text[:300]):
         result["rejected_because"] = "music_video"
