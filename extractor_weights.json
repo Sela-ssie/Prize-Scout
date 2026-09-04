@@ -1,0 +1,23 @@
+{
+  "bias": -2.6,
+  "threshold": 0.5,
+  "calibrated": false,
+  "weights": {
+    "strong_keyword": 1.6,
+    "strong_phrase": 1.5,
+    "entry_keyword": 0.9,
+    "prize_with_value": 1.4,
+    "prize_item": 0.9,
+    "has_deadline": 1.1,
+    "has_howto": 0.9,
+    "howto_multi_step": 0.5,
+    "is_tag_dump": -1.8,
+    "music_video": -2.0,
+    "short_text": -0.9,
+    "no_fields": -1.5,
+    "hashtag_ratio": -1.2
+  },
+  "_comment": "Confidence model weights. UNCALIBRATED priors until scripts/calibrate.py is run against data/labels.jsonl. Do not hand-edit to make eval numbers look better; refit instead.",
+  "fitted_on": null,
+  "n_train": 0
+}
