@@ -68,7 +68,13 @@ lower it to make a red build green.
 python scripts/collect_corpus.py --max-units 3000   # ONCE. spends real quota. -> data/corpus.jsonl
 python scripts/label.py                             # human labels. resumable. -> data/labels.jsonl
 python scripts/eval.py                              # precision/recall/F1 + worst false positives
+python scripts/calibrate.py                         # refit confidence weights on a holdout split
 ```
+`eval.py` falls back to `tests/fixtures/seed_labels.jsonl` when no real labels exist. Those
+seed fixtures are saturated (the extractor was iterated against them), so treat their 1.0 as
+"the documented v1 bugs are fixed", never as a precision estimate. `calibrate.py` refuses to
+fit on fewer than 60 labels and reports HOLDOUT numbers, never numbers from the training
+split — a few hundred labels against hand-designed features overfits easily.
 `data/` is gitignored — the corpus is API-cached content and must not be committed (30-day
 rule), and it is large. Collect it once; after that, extractor iteration is free forever.
 Never tune the extractor by re-running live searches.
