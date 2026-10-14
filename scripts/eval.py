@@ -105,7 +105,8 @@ def evaluate(rows, now=None):
     detected_stats = {f: {"correct": 0, "total": 0} for f in ("prize", "deadline", "howto")}
 
     for row in rows:
-        result = extract(row["text"], published_at=row["published_at"], now=now)
+        result = extract(row["text"], published_at=row["published_at"], now=now,
+                         title=row.get("title", ""))
         predicted = result["is_giveaway"]
         actual = bool(row["label"]["is_giveaway"])
 

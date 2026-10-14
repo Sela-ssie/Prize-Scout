@@ -1,16 +1,20 @@
 {
   "_comment": "Regression gate for tests/test_eval_regression.py. This is a RATCHET: raise it when the extractor improves, never lower it to make a red build green. min_recall exists so precision cannot be bought by rejecting everything.",
-  "min_precision": 0.90,
-  "min_recall": 0.70,
-  "target_precision": 0.90,
+  "min_precision": 0.9,
+  "min_recall": 0.7,
+  "target_precision": 0.9,
   "measured": {
     "dataset": "tests/fixtures/seed_labels.jsonl",
-    "extractor_version": "2.1.0",
+    "extractor_version": "2.2.0",
     "precision": 1.0,
     "recall": 1.0,
     "f1": 1.0,
     "n": 36,
-    "field_accuracy": {"prize": 1.0, "deadline": 1.0, "howto": 1.0},
-    "caveat": "36 hand-built seed items, 9 of them real text from the v1 database. The extractor was iterated against this set, so 1.0 is SATURATION, not a precision estimate. It proves the documented v1 bugs are fixed and nothing more. Replace with data/labels.jsonl numbers once a real corpus is collected and labelled, and raise min_precision to whatever holds there."
+    "field_accuracy": {
+      "prize": 1.0,
+      "deadline": 1.0,
+      "howto": 1.0
+    },
+    "caveat": "36 hand-built seed items, 9 of them real text from the v1 database. The extractor was iterated against this set, so 1.0 is SATURATION, not a precision estimate. It proves the documented v1 bugs are fixed and nothing more. It also cannot score the 2.2.0 title input: the seed titles agree with their descriptions, so no seed item turns on the title alone. Replace with data/labels.jsonl numbers once a real corpus is collected and labelled, and raise min_precision to whatever holds there."
   }
 }

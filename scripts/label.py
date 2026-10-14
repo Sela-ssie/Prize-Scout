@@ -103,7 +103,8 @@ def main() -> int:
     queue = [item for item in corpus if item["video_id"] not in done]
 
     guesses = {item["video_id"]: extract(item.get("description", ""),
-                                         published_at=item.get("published_at"))
+                                         published_at=item.get("published_at"),
+                                         title=item.get("title", ""))
                for item in queue}
     if args.only_guessed_giveaway:
         queue = [i for i in queue if guesses[i["video_id"]]["is_giveaway"]]

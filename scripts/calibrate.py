@@ -5,10 +5,11 @@
     python scripts/calibrate.py --dry-run       # report only, write nothing
 
 Fits an L2-regularised logistic regression over the extractor's named features on a
-deterministic train split, then picks the decision threshold on the HELD-OUT split as the
-one that maximises recall subject to precision >= --target-precision. Reporting the fit on
-the data it was fitted to would overstate performance, so holdout numbers are what is
-printed and recorded.
+deterministic grouped train split, picks the threshold on a separate validation split,
+and evaluates the frozen model once on the test split. Exact duplicate source texts and
+explicit label campaign_id/group_id values stay together. Related promotions with
+changed text still require manually assigned campaign IDs before a release-quality fit.
+Provisional agent labels are refused; adjudicate them first.
 
 No scikit-learn: plain gradient descent keeps this a two-dependency project.
 """
@@ -18,6 +19,8 @@ import json
 import math
 import sys
 import zlib
+import hashlib
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,20 +35,77 @@ MIN_LABELS = 60
 
 
 def featurise(row, now):
-    text = row["text"]
-    prizes = E.extract_prizes(text)
-    deadline = E.find_deadline(text, now=now, published_at=E._coerce_dt(row["published_at"]))
-    howto = E.find_howto(text)
-    return E.compute_features(text, prizes, deadline, howto)
+    """Delegates to extractor.analyse so the fitted features cannot drift from the
+    runtime ones. Fitting on features extract() never computes would silently produce
+    weights for a model that does not exist."""
+    return E.analyse(row["text"], title=row.get("title", ""),
+                     published_at=row["published_at"], now=now)["features"]
 
 
-def split(rows, holdout_fraction=0.3):
-    """Deterministic by video_id, so re-running does not reshuffle the holdout."""
-    train, test = [], []
+def split(rows, holdout_fraction=0.4):
+    """Train/validation/test with duplicate and explicit campaign grouping.
+
+    holdout_fraction is shared equally by validation and final test. Union-find keeps
+    connected duplicate IDs, duplicate texts and campaign IDs in a single partition.
+    """
+    if not 0 < holdout_fraction < 1:
+        raise ValueError("holdout must be between zero and one")
+    parents = list(range(len(rows)))
+    def root(i):
+        while parents[i] != i:
+            parents[i] = parents[parents[i]]
+            i = parents[i]
+        return i
+    seen = {}
+    keys_by_row = []
+    for i, row in enumerate(rows):
+        content = re.sub(r"\s+", " ", row.get("text", "").strip().lower())
+        if not content:
+            content = row.get("title", "").strip().lower()
+        keys = ["id:" + row["video_id"]]
+        if content:
+            keys.append("text:" + hashlib.sha256(content.encode()).hexdigest())
+        campaign = row["label"].get("campaign_id") or row["label"].get("group_id")
+        if campaign:
+            keys.append("campaign:" + str(campaign))
+        keys_by_row.append(keys)
+        for key in keys:
+            if key in seen:
+                parents[root(i)] = root(seen[key])
+            seen[key] = i
+    groups = {}
+    for i, row in enumerate(rows):
+        groups.setdefault(root(i), []).append((row, keys_by_row[i]))
+    train, validation, test = [], [], []
+    for group in groups.values():
+        # Prefer explicit campaign key, then source fingerprint, then video ID.
+        keys = sorted({key for _, keys in group for key in keys})
+        key = next((k for k in keys if k.startswith("campaign:")), None)
+        key = key or next((k for k in keys if k.startswith("text:")), keys[0])
+        bucket = zlib.crc32(key.encode()) / 2**32
+        destination = test if bucket < holdout_fraction / 2 else (
+            validation if bucket < holdout_fraction else train)
+        destination.extend(row for row, _ in group)
+    return train, validation, test
+
+
+def runtime_scores(rows, weights, bias, now):
+    """Use the deployment hard gates as well as its confidence model."""
+    model = {"weights": weights, "bias": bias, "threshold": 0.0}
+    scores = []
     for row in rows:
-        bucket = zlib.crc32(row["video_id"].encode()) % 100
-        (test if bucket < holdout_fraction * 100 else train).append(row)
-    return train, test
+        result = E.extract(row["text"], title=row.get("title", ""),
+                           published_at=row["published_at"], now=now, weights=model)
+        scores.append(result["confidence"] if result["is_giveaway"] else -1.0)
+    return scores
+
+
+def classification_metrics(scores, targets, threshold):
+    tp = sum(s >= threshold and bool(t) for s, t in zip(scores, targets))
+    fp = sum(s >= threshold and not t for s, t in zip(scores, targets))
+    positives = sum(targets)
+    return {"precision": tp / (tp + fp) if tp + fp else 0.0,
+            "recall": tp / positives if positives else 0.0, "tp": tp, "fp": fp}
 
 
 def fit(x_rows, y, feature_names, epochs=4000, learning_rate=0.1, l2=0.01):
@@ -74,19 +134,14 @@ def score(features, weights, bias):
 
 
 def pick_threshold(scores, targets, target_precision):
-    """Highest recall subject to precision >= target. Precision is the priority."""
+    """Tune only on validation; rejecting everything is not a successful fit."""
     best = None
-    for candidate in sorted({round(s, 3) for s in scores} | {0.5}):
-        tp = sum(1 for s, t in zip(scores, targets) if s >= candidate and t)
-        fp = sum(1 for s, t in zip(scores, targets) if s >= candidate and not t)
-        fn = sum(1 for s, t in zip(scores, targets) if s < candidate and t)
-        precision = tp / (tp + fp) if (tp + fp) else 1.0
-        recall = tp / (tp + fn) if (tp + fn) else 0.0
-        if precision >= target_precision and (best is None or recall > best[2]):
-            best = (candidate, precision, recall)
-    if best is None:
-        return None, 0.0, 0.0
-    return best
+    for candidate in sorted({s for s in scores if s >= 0} | {0.5}):
+        metrics = classification_metrics(scores, targets, candidate)
+        if metrics["tp"] and metrics["precision"] >= target_precision:
+            if best is None or metrics["recall"] > best[2]:
+                best = candidate, metrics["precision"], metrics["recall"]
+    return best if best is not None else (None, 0.0, 0.0)
 
 
 def main() -> int:
@@ -94,7 +149,10 @@ def main() -> int:
     ap.add_argument("--labels", type=Path, default=ROOT / "data" / "labels.jsonl")
     ap.add_argument("--corpus", type=Path, default=ROOT / "data" / "corpus.jsonl")
     ap.add_argument("--target-precision", type=float, default=0.90)
-    ap.add_argument("--holdout", type=float, default=0.3)
+    ap.add_argument("--holdout", type=float, default=0.4,
+                    help="combined validation and test fraction; half for each")
+    ap.add_argument("--now", help="required reference clock unless fixture provides now (ISO)")
+    ap.add_argument("--target-recall", type=float, default=0.70)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--min-labels", type=int, default=MIN_LABELS,
                     help="lower only to exercise the fitting path; fitting on few labels overfits")
@@ -106,36 +164,58 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
-    rows, _ = build_dataset(labels, {i["video_id"]: i for i in load_jsonl(args.corpus)})
+    if any(label.get("label_source") == "agent" or label.get("needs_review")
+           for label in labels if label.get("video_id") != "_readme"):
+        print("refusing provisional annotations; adjudicate and record reviewed provenance first", file=sys.stderr)
+        return 2
+    rows, missing = build_dataset(labels, {i["video_id"]: i for i in load_jsonl(args.corpus)})
+    if missing:
+        print("labels missing source text; refusing incomplete fit", file=sys.stderr)
+        return 2
     if len(rows) < args.min_labels:
         print(f"only {len(rows)} labels; refusing to fit on fewer than {args.min_labels}. "
               f"Weights fitted on a handful of examples are worse than the hand-set priors.",
               file=sys.stderr)
         return 2
 
-    now = fixture_now(labels)
-    feature_names = list(E.DEFAULT_WEIGHTS["weights"])
-    train, test = split(rows, args.holdout)
-    if not test or not train:
-        print("split produced an empty side; need more labels", file=sys.stderr)
+    try:
+        now = datetime.fromisoformat(args.now.replace("Z", "+00:00")) if args.now else fixture_now(labels)
+        if now is not None and now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+    except ValueError:
+        print("--now must be an ISO datetime", file=sys.stderr)
         return 2
-
+    if now is None:
+        print("supply --now to pin availability and relative-date features", file=sys.stderr)
+        return 2
+    feature_names = list(E.DEFAULT_WEIGHTS["weights"])
+    try:
+        train, validation, test = split(rows, args.holdout)
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    for name, partition in [("train", train), ("validation", validation), ("test", test)]:
+        if {bool(r["label"]["is_giveaway"]) for r in partition} != {True, False}:
+            print(f"{name} needs both positive and negative reviewed labels; collect more data", file=sys.stderr)
+            return 2
     x_train = [featurise(r, now) for r in train]
-    y_train = [1 if r["label"]["is_giveaway"] else 0 for r in train]
-    x_test = [featurise(r, now) for r in test]
-    y_test = [1 if r["label"]["is_giveaway"] else 0 for r in test]
-
+    y_train = [int(r["label"]["is_giveaway"]) for r in train]
+    y_validation = [int(r["label"]["is_giveaway"]) for r in validation]
+    y_test = [int(r["label"]["is_giveaway"]) for r in test]
     weights, bias = fit(x_train, y_train, feature_names)
-    test_scores = [score(f, weights, bias) for f in x_test]
-    threshold, precision, recall = pick_threshold(test_scores, y_test, args.target_precision)
-
-    print(f"train {len(train)} ({sum(y_train)} positive) / holdout {len(test)} ({sum(y_test)} positive)")
-    if threshold is None:
-        print(f"no threshold reaches precision {args.target_precision} on the holdout. "
-              f"Keeping the existing weights; the features are not separating these labels.",
-              file=sys.stderr)
+    validation_scores = runtime_scores(validation, weights, bias, now)
+    threshold, precision, recall = pick_threshold(validation_scores, y_validation, args.target_precision)
+    print(f"train {len(train)} / validation {len(validation)} / untouched test {len(test)}")
+    if threshold is None or recall < args.target_recall:
+        print("validation cannot meet quality floors; keeping existing weights", file=sys.stderr)
         return 1
-    print(f"holdout: threshold {threshold:.3f}  precision {precision:.3f}  recall {recall:.3f}")
+    # No fitting or threshold adjustment follows this final-test evaluation.
+    final = classification_metrics(runtime_scores(test, weights, bias, now), y_test, threshold)
+    print(f"validation: precision {precision:.3f} recall {recall:.3f}")
+    print(f"test: precision {final['precision']:.3f} recall {final['recall']:.3f}")
+    if final["precision"] < args.target_precision or final["recall"] < args.target_recall:
+        print("final test fails quality floors; keeping existing weights", file=sys.stderr)
+        return 1
     print("\nfitted weights:")
     for name in sorted(feature_names, key=lambda k: -abs(weights[k])):
         print(f"  {name:20s} {weights[name]:+.3f}")
@@ -146,14 +226,16 @@ def main() -> int:
         return 0
 
     WEIGHTS_PATH.write_text(json.dumps({
-        "bias": round(bias, 4),
+        "bias": bias,
         "threshold": threshold,
         "calibrated": True,
-        "weights": {k: round(v, 4) for k, v in weights.items()},
+        "weights": weights,
         "_comment": "Fitted by scripts/calibrate.py. Do not hand-edit to move eval numbers; refit.",
         "fitted_on": datetime.now(timezone.utc).isoformat(),
         "n_train": len(train),
-        "holdout": {"n": len(test), "precision": round(precision, 4), "recall": round(recall, 4)},
+        "reference_now": now.isoformat(),
+        "validation": {"n": len(validation), "precision": precision, "recall": recall},
+        "test": {"n": len(test), **final},
     }, indent=2) + "\n")
     print(f"\nwrote {WEIGHTS_PATH.relative_to(ROOT)} — re-run scripts/eval.py to confirm.")
     return 0
