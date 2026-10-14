@@ -11,6 +11,13 @@ stored in production as PRIZES.
 Confidence is a linear model over named features whose weights live in
 ``extractor_weights.json`` so they can be refit from labelled data
 (``scripts/calibrate.py``) rather than hand-tuned in code.
+
+The title is a second input, kept deliberately separate from the description. A creator
+who runs a giveaway usually says so in the title ("$500 PS5 GIVEAWAY"), and the old
+description-only path rejected those outright at ``no_giveaway_indicator`` even though
+the title had already been fetched at zero extra quota. The title is *not* concatenated
+into the description: ``short_text``, ``hashtag_ratio`` and ``is_tag_dump`` are ratios
+over the description, and prepending a title would move all three for every video.
 """
 
 import json
@@ -23,7 +30,7 @@ from typing import Dict, List, Optional
 import dateparser
 from dateparser.search import search_dates
 
-EXTRACTOR_VERSION = "2.1.0"
+EXTRACTOR_VERSION = "2.3.0"
 
 _WEIGHTS_PATH = Path(__file__).resolve().parents[1] / "extractor_weights.json"
 
@@ -45,7 +52,7 @@ ENTRY_KEYWORDS = [
 ]
 DEADLINE_KEYWORDS = [
     "deadline", "ends", "ends on", "end date", "closes", "closing", "until", "expires",
-    "expiry", "last day", "winner announced", "drawn on", "draw date", "before",
+    "expiry", "last day", "enter by", "entries close", "entry deadline", "ended on", "closed on",
 ]
 HOWTO_KEYWORDS = [
     "how to enter", "to enter", "enter by", "steps to enter", "subscribe", "subscribing",
@@ -71,6 +78,8 @@ CLOSED_GIVEAWAY_PATTERNS = [
     r"\bcontest\s+(?:has\s+)?(?:ended|closed)\b",
     r"\bwinner[s]?\s+(?:has|have|was|were)\s+(?:already\s+)?(?:been\s+)?(?:announced|picked|chosen|selected|contacted|drawn)\b",
     r"\bwinner[s]?\s+has\s+already\s+been\b",
+    r"\bwinner[s]?\s+announce(?:d|ment)\b(?!\s+soon)",
+    r"\bwinner[s]?\s+reveal(?:ed)?\b",
     r"\bcongratulations\s+to\s+(?:the|our|my)\s+winner",
     r"\bno\s+longer\s+accepting\s+entries\b",
     r"\bthis\s+giveaway\s+is\s+over\b",
@@ -332,6 +341,7 @@ _VALUE_CUE_RE = re.compile(r"\b(?:worth|valued\s+at|value(?:d)?(?:\s+of)?|priced
 _BRAND_STOPWORDS = {
     "win", "a", "an", "the", "and", "or", "to", "for", "new", "free", "get", "of", "one",
     "your", "our", "my", "this", "that", "is", "are", "we", "i", "you", "enter", "giveaway",
+    "away", "giving", "grabs", "worth",
 }
 
 
@@ -375,12 +385,18 @@ def _prize_candidates(text: str) -> List[str]:
     return out
 
 
-def extract_prizes(text: str) -> List[Dict]:
+def extract_prizes(text: str, include_money_labels: bool = True) -> List[Dict]:
     """Structured prizes: a list of {item, value_usd}, most valuable first.
 
     Each money amount is assigned to the single nearest item mention within a window, so
     "Win a Nintendo Switch and a $500 Amazon gift card" credits $500 to the gift card
     alone rather than to both items.
+
+    ``include_money_labels`` controls the fallback that names an unclaimed amount from the
+    words after it. That reads a prose sentence correctly ("$100 Steam Giftcard") but turns
+    a title into nonsense -- "$1200 PC GIVEAWAY!" became the prize "PC GIVEAWAY" and
+    "$13K Gaming Giveaway Yet" became "Gaming Giveaway Yet". Titles pass False, so a title
+    only ever contributes a prize that ITEM_RE actually recognises.
     """
     prizes: List[Dict] = []
     seen = set()
@@ -434,7 +450,7 @@ def extract_prizes(text: str) -> List[Dict]:
             prizes.append({"item": name, "value_usd": value})
 
         for money_index, (mm, value) in enumerate(monies):
-            if money_index in claimed:
+            if money_index in claimed or not include_money_labels:
                 continue
             label = _money_label(seg, mm)
             key = (label.lower(), value)
@@ -481,41 +497,51 @@ def summarize_prizes(prizes: List[Dict]) -> Optional[str]:
 # Deadlines
 # --------------------------------------------------------------------------------------
 
-def _parse_date(candidate: str) -> Optional[datetime]:
-    parsed = dateparser.parse(candidate, settings=_DATEPARSER_SETTINGS)
+def _parse_date(candidate: str, reference: Optional[datetime] = None) -> Optional[datetime]:
+    settings = dict(_DATEPARSER_SETTINGS)
+    if reference is not None:
+        settings["RELATIVE_BASE"] = reference
+    parsed = dateparser.parse(candidate, settings=settings)
     if parsed is not None and parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
 
 
-def find_first_date(text: str) -> Optional[datetime]:
+def find_first_date(text: str, reference: Optional[datetime] = None) -> Optional[datetime]:
+    """Parse date evidence with a supplied clock, never an implicit machine clock.
+
+    Calendar-only cutoffs last through that UTC calendar day. Timezones explicitly
+    supplied with a clock time are honoured. Missing source timezone remains an
+    approximation, not a verified eligibility boundary.
+    """
+    settings = dict(_DATEPARSER_SETTINGS)
+    if reference is not None:
+        settings["RELATIVE_BASE"] = reference
+    # search_dates can interpret standalone years and incidental words as dates.
+    # Require recognisable date evidence before invoking it.
+    if not _DATEISH_RE.search(text):
+        return None
+    candidates = []
     for pattern in DATE_PATTERNS:
-        m = pattern.search(text)
-        if m:
-            parsed = _parse_date(m.group(0))
-            if parsed:
-                return parsed
-    found = search_dates(text, settings=_DATEPARSER_SETTINGS)
-    if found:
-        for matched, dt in found:
-            if not _DATEISH_RE.search(matched):
-                continue  # "three past winners" is not a date
-            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        match = pattern.search(text)
+        if match:
+            candidate = match.group(0)
+            tail = text[match.end():]
+            time_match = re.match(
+                r"\s*(?:at\s+|[-–]\s*)?(\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)"
+                r"(?:\s+(?:UTC|GMT|EST|EDT|CST|CDT|MST|MDT|PST|PDT))?)", tail, re.I)
+            if time_match:
+                candidate += " " + time_match.group(1)
+            candidates.append(candidate)
+    if not candidates:
+        candidates = [matched for matched, _ in (search_dates(text, settings=settings) or [])
+                      if _DATEISH_RE.search(matched)]
+    for candidate in candidates:
+        parsed = _parse_date(candidate, reference)
+        if parsed:
+            explicit_time = re.search(r"\d:\d|\d\s*(?:am|pm)\b|midnight|noon|hours?", candidate, re.I)
+            return parsed if explicit_time else parsed.replace(hour=23, minute=59, second=59, microsecond=0)
     return None
-
-
-def _plausible_deadline(dt: Optional[datetime], now: datetime, published_at: Optional[datetime]) -> bool:
-    if dt is None:
-        return False
-    if dt < now:
-        return False  # a giveaway that already closed is not a deadline worth showing
-    if dt - now > MAX_DEADLINE_HORIZON:
-        return False
-    if published_at is not None and dt.date() == published_at.date():
-        # Matching the upload date almost always means we matched the video's own
-        # publication date rather than a closing date.
-        return False
-    return True
 
 
 def find_deadline(
@@ -523,17 +549,20 @@ def find_deadline(
     now: Optional[datetime] = None,
     published_at: Optional[datetime] = None,
 ) -> Optional[datetime]:
+    """Return explicit entry cutoff evidence, including expired dates.
+
+    Publication anchors relative phrases and missing years; reprocessing a video must
+    not move its deadline. Unrelated upload/draw dates and SEO 'live today' are not
+    entry cutoffs. Unknown is preferable to inventing an expiry.
+    """
     now = now or datetime.now(timezone.utc)
-    lower = text.lower()
-
-    for m in DEADLINE_RE.finditer(lower):
-        window = text[m.start(): m.start() + 200]
-        dt = find_first_date(window)
-        if _plausible_deadline(dt, now, published_at):
-            return dt
-
-    dt = find_first_date(text)
-    return dt if _plausible_deadline(dt, now, published_at) else None
+    reference = published_at or now
+    for match in DEADLINE_RE.finditer(text):
+        window = re.split(r"\n|[.!?]\s", text[match.end():match.end() + 160], maxsplit=1)[0]
+        deadline = find_first_date(window, reference=reference)
+        if deadline and deadline - reference <= MAX_DEADLINE_HORIZON:
+            return deadline
+    return None
 
 
 # --------------------------------------------------------------------------------------
@@ -579,6 +608,9 @@ DEFAULT_WEIGHTS = {
         "short_text": -0.9,
         "no_fields": -1.5,
         "hashtag_ratio": -1.2,
+        "title_strong": 1.3,
+        "title_prize_value": 0.8,
+        "title_music": -1.5,
     },
 }
 
@@ -610,8 +642,12 @@ def compute_features(
     deadline: Optional[datetime],
     howto: Optional[str],
     dump_fraction: Optional[float] = None,
+    title: str = "",
+    title_prizes: Optional[List[Dict]] = None,
 ) -> Dict[str, float]:
     tokens = _TOKEN_RE.findall(text) or [""]
+    title = title or ""
+    title_prizes = title_prizes or []
     return {
         "strong_keyword": 1.0 if STRONG_RE.search(text) else 0.0,
         "strong_phrase": 1.0 if STRONG_PHRASE_RE.search(text) else 0.0,
@@ -628,6 +664,12 @@ def compute_features(
         "first_person_offer": 1.0 if FIRST_PERSON_OFFER_RE.search(text) else 0.0,
         "meta_discussion": 1.0 if META_DISCUSSION_RE.search(text) else 0.0,
         "hashtag_ratio": min(1.0, text.count("#") / len(tokens)),
+        # Title signals stay their own features rather than being folded into the text
+        # ones. A giveaway word in a title is stronger evidence than the same word in a
+        # description -- titles are written for humans, descriptions are half SEO.
+        "title_strong": 1.0 if (STRONG_RE.search(title) or STRONG_PHRASE_RE.search(title)) else 0.0,
+        "title_prize_value": 1.0 if any(p["value_usd"] is not None for p in title_prizes) else 0.0,
+        "title_music": 1.0 if MUSIC_RE.search(title) else 0.0,
     }
 
 
@@ -648,15 +690,76 @@ def _coerce_dt(value) -> Optional[datetime]:
     return parsed
 
 
+def _merge_prizes(primary: List[Dict], extra: List[Dict], limit: int = 10) -> List[Dict]:
+    """Description prizes first, then any the title names that they missed."""
+    merged = list(primary)
+    seen = {(p["item"].lower(), p["value_usd"]) for p in merged}
+    for prize in extra:
+        key = (prize["item"].lower(), prize["value_usd"])
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(prize)
+    merged.sort(key=lambda p: (p["value_usd"] is None, -(p["value_usd"] or 0)))
+    return merged[:limit]
+
+
+def analyse(
+    text: str,
+    title: str = "",
+    published_at=None,
+    now: Optional[datetime] = None,
+    dump_fraction: Optional[float] = None,
+) -> Dict:
+    """Fields and features for one video, with no accept/reject gating.
+
+    ``extract`` gates on top of this and ``scripts/calibrate.py`` fits on it. They have to
+    see identical features: weights fitted on features the runtime never computes describe
+    a model that does not exist.
+    """
+    text = text or ""
+    title = (title or "").strip()
+    now = now or datetime.now(timezone.utc)
+    published = _coerce_dt(published_at)
+
+    if dump_fraction is None:
+        dump_fraction = tag_dump_fraction(text)
+
+    # Titles are clickbait: "$5000 Gaming PC Build" names no prize. Only mine a title once
+    # it has actually announced a giveaway.
+    title_strong = bool(STRONG_RE.search(title) or STRONG_PHRASE_RE.search(title))
+    title_prizes = extract_prizes(title, include_money_labels=False) if title_strong else []
+    prizes = _merge_prizes(extract_prizes(text), title_prizes)
+
+    # Deadline and how-to stay description-only. A title has no room for entry steps, and
+    # find_deadline over a title reads stray years ("2026 Giveaway") as a closing date.
+    deadline = find_deadline(text, now=now, published_at=published)
+    howto = find_howto(text)
+
+    return {
+        "prizes": prizes,
+        "title_prizes": title_prizes,
+        "title_strong": title_strong,
+        "deadline": deadline,
+        "howto": howto,
+        "dump_fraction": dump_fraction,
+        "features": compute_features(text, prizes, deadline, howto,
+                                     dump_fraction=dump_fraction,
+                                     title=title, title_prizes=title_prizes),
+    }
+
+
 def extract(
     text: str,
     published_at=None,
     now: Optional[datetime] = None,
+    title: Optional[str] = None,
+    weights: Optional[Dict] = None,
 ) -> Dict:
     """Full extraction result, always returned (never None) so callers can see the score."""
     text = text or ""
+    title = (title or "").strip()
     now = now or datetime.now(timezone.utc)
-    published = _coerce_dt(published_at)
 
     result = {
         "is_giveaway": False,
@@ -667,53 +770,76 @@ def extract(
         "confidence": 0.0,
         "extractor_version": EXTRACTOR_VERSION,
         "rejected_because": None,
+        "title_only": False,
+        "availability": "unknown",
     }
 
-    if len(text) < 50:
+    # A title-bearing giveaway can have a near-empty description, so the length floor is
+    # over both fields rather than the description alone.
+    if len(text) + len(title) < 50:
         result["rejected_because"] = "too_short"
         return result
-    if NEGATION_RE.search(text):
+    # These two run over the title as well. Admitting titles widens what gets in, and
+    # "GIVEAWAY WINNER ANNOUNCED" is exactly what that widening would otherwise let past.
+    if NEGATION_RE.search(text) or NEGATION_RE.search(title):
         result["rejected_because"] = "negation"
         return result
-    if CLOSED_RE.search(text):
+    if CLOSED_RE.search(text) or CLOSED_RE.search(title):
         result["rejected_because"] = "already_closed"
+        result["availability"] = "expired"
+        closed_deadline = find_deadline(text, now=now, published_at=_coerce_dt(published_at))
+        result["deadline"] = closed_deadline.isoformat() if closed_deadline else None
         return result
     if MUSIC_RE.search(text[:300]):
         result["rejected_because"] = "music_video"
         return result
-    if not (STRONG_RE.search(text) or STRONG_PHRASE_RE.search(text)):
+
+    analysis = analyse(text, title=title, published_at=published_at, now=now)
+    text_strong = bool(STRONG_RE.search(text) or STRONG_PHRASE_RE.search(text))
+    if not (text_strong or analysis["title_strong"]):
         # An entry keyword alone ("entry", "participate") is far too weak to admit.
         result["rejected_because"] = "no_giveaway_indicator"
         return result
-    dump_fraction = tag_dump_fraction(text)
-    if dump_fraction > 0.85:
+    if analysis["dump_fraction"] > 0.85:
         result["rejected_because"] = "tag_dump"
         return result
 
-    prizes = extract_prizes(text)
-    deadline = find_deadline(text, now=now, published_at=published)
-    howto = find_howto(text)
+    # A generic subscribe request plus a GIVEAWAY headline is not an entry offer.
+    # Require a prize, cutoff, entry wording or an explicit first-person offer.
+    if not (analysis["prizes"] or analysis["deadline"] or ENTRY_RE.search(text)
+            or STRONG_PHRASE_RE.search(text) or FIRST_PERSON_OFFER_RE.search(text)):
+        result["rejected_because"] = "unsupported_giveaway_mention"
+        return result
 
-    features = compute_features(text, prizes, deadline, howto, dump_fraction=dump_fraction)
-    confidence = confidence_from_features(features)
+    deadline = analysis["deadline"]
+    confidence = confidence_from_features(analysis["features"], weights=weights)
 
     result.update(
-        prizes=prizes,
-        prize_summary=summarize_prizes(prizes),
+        prizes=analysis["prizes"],
+        prize_summary=summarize_prizes(analysis["prizes"]),
         deadline=deadline.isoformat() if deadline else None,
-        howto=howto,
+        howto=analysis["howto"],
         confidence=round(confidence, 4),
-        features=features,
+        features=analysis["features"],
+        title_only=analysis["title_strong"] and not text_strong,
     )
-    result["is_giveaway"] = confidence >= _WEIGHTS.get("threshold", 0.5)
+    if deadline and deadline < now:
+        result["availability"] = "expired"
+        result["rejected_because"] = "expired"
+        return result
+    result["is_giveaway"] = confidence >= (weights if weights is not None else _WEIGHTS).get("threshold", 0.5)
+    if result["is_giveaway"] and deadline:
+        result["availability"] = "active"
     if not result["is_giveaway"]:
         result["rejected_because"] = "below_threshold"
     return result
 
 
-def extract_giveaways_from_description(text: str, published_at=None, now=None) -> Optional[Dict]:
+def extract_giveaways_from_description(
+    text: str, published_at=None, now=None, title: Optional[str] = None
+) -> Optional[Dict]:
     """Backwards-compatible wrapper: returns None when this is not a giveaway."""
-    res = extract(text, published_at=published_at, now=now)
+    res = extract(text, published_at=published_at, now=now, title=title)
     if not res["is_giveaway"]:
         return None
     return {
@@ -723,4 +849,6 @@ def extract_giveaways_from_description(text: str, published_at=None, now=None) -
         "howto": res["howto"],
         "confidence": res["confidence"],
         "extractor_version": res["extractor_version"],
+        "title_only": res["title_only"],
+        "availability": res["availability"],
     }
