@@ -11,10 +11,11 @@ never shown again. Ctrl-C is safe.
 """
 
 import argparse
+import hashlib
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,9 +74,9 @@ def show(item, guess, index, total, remaining):
     description = item.get("description", "")
     print("\n" + "=" * 78)
     print(f"{BOLD}[{index}/{total}]{RESET} {DIM}{remaining} left{RESET}  "
-          f"{BOLD}{item.get('title', '')[:70]}{RESET}")
+          f"{BOLD}{(item.get('title') or '')[:70]}{RESET}")
     print(f"{DIM}{item['video_id']} | query={item.get('query', '?')} | "
-          f"published={item.get('published_at', '')[:10]} | {len(description)} chars{RESET}")
+          f"published={(item.get('published_at') or '')[:10]} | {len(description)} chars{RESET}")
     print("-" * 78)
     body = description if len(description) <= 1800 else description[:1800] + f"\n{DIM}... (truncated, 'f' to see all){RESET}"
     print(body if body.strip() else f"{DIM}(empty description){RESET}")
@@ -85,14 +86,171 @@ def show(item, guess, index, total, remaining):
     print(f"{BOLD}extractor guess:{RESET} {verdict}{DIM}{reason}  conf={guess['confidence']}{RESET}")
 
 
-def main() -> int:
+
+SOURCE_FIELDS = ('video_id', 'channel_id', 'channel_title', 'title', 'url', 'published_at', 'description', 'fetched_at')
+
+
+def _utcnow():
+    return datetime.now(timezone.utc)
+
+
+def _aware(value):
+    dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        raise ValueError('packet clocks must be timezone-aware')
+    return dt.astimezone(timezone.utc)
+
+
+def load_packet(directory, *, now=None):
+    """Validate all sources before showing any review or creating label output."""
+    now = _utcnow() if now is None else now
+    manifest = json.loads((directory / 'manifest.json').read_text())
+    if any(key in manifest for key in ('eligible_bucket_counts', 'selected_balance', 'sampling_audit')):
+        raise ValueError('packet exposes prediction audit counts; prepare a fresh blinded packet')
+    if manifest.get('schema_version') != 1:
+        raise ValueError('unsupported packet schema')
+    annotation_clock = _aware(manifest['now'])
+    if annotation_clock > now:
+        raise ValueError('packet annotation clock is in the future')
+    for name in ('corpus.jsonl', 'assignments.jsonl'):
+        if not (directory / name).is_file():
+            raise ValueError('incomplete packet: ' + name)
+    corpus = load_jsonl(directory / 'corpus.jsonl')
+    assignments = load_jsonl(directory / 'assignments.jsonl')
+    by_id = {row['video_id']: row for row in assignments}
+    if len(by_id) != len(assignments) or len({row['video_id'] for row in corpus}) != len(corpus):
+        raise ValueError('duplicate packet video IDs')
+    if set(by_id) != {row['video_id'] for row in corpus} or len(corpus) != manifest['selected_videos']:
+        raise ValueError('packet assignment/source counts differ')
+    groups = {}
+    for row in corpus:
+        assignment = by_id[row['video_id']]
+        for key in ('group_id', 'suggested_split', 'source_snapshot_sha256'):
+            if not row.get(key) or row[key] != assignment.get(key):
+                raise ValueError('packet assignment metadata mismatch')
+        group, split = row['group_id'], row['suggested_split']
+        if split not in ('train', 'validation', 'test') or groups.setdefault(group, split) != split:
+            raise ValueError('invalid or leaking packet split')
+        position = int(hashlib.sha256(group.encode()).hexdigest()[:16], 16) % 100
+        expected = 'train' if position < 60 else 'validation' if position < 80 else 'test'
+        if split != expected:
+            raise ValueError('packet split does not match group hash')
+        source = {key: row[key] for key in SOURCE_FIELDS}
+        digest = hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        if digest != row['source_snapshot_sha256']:
+            raise ValueError('packet source snapshot hash mismatch')
+        fetched = _aware(row['fetched_at'])
+        if fetched > annotation_clock or fetched > now or fetched < annotation_clock - timedelta(days=30) or fetched < now - timedelta(days=30):
+            raise ValueError('packet source is stale or has an invalid fetch clock; refresh and prepare again')
+    if len(groups) != manifest['selected_groups']:
+        raise ValueError('packet group count differs')
+    return corpus, annotation_clock.isoformat()
+
+
+def _explicit(prompt, choices):
+    while True:
+        answer = input(prompt).strip().lower()
+        if answer in choices:
+            return answer
+        print('Choose explicitly: ' + '/'.join(choices))
+
+
+def _blind_text(field):
+    while True:
+        raw = input(field + " [blank or '-'=unknown/none] > ").strip()
+        if not raw or raw.lower() in NULL_TOKENS:
+            return None
+        if field != 'deadline':
+            return raw
+        parsed = parse_deadline(raw)
+        if parsed is not None:
+            return parsed
+        print('Use YYYY-MM-DD or an ISO timestamp.')
+
+
+def run_blind(corpus, labels_path, *, reviewer=None, annotation_as_of=None, limit=None, packet=False):
+    existing = load_jsonl(labels_path)
+    by_id = {row['video_id']: row for row in corpus}
+    if packet:
+        for previous in existing:
+            if previous['video_id'] in by_id:
+                source = by_id[previous['video_id']]
+                for field, expected in [('group_id', source['group_id']), ('split', source['suggested_split']),
+                                        ('source_snapshot_sha256', source['source_snapshot_sha256']),
+                                        ('annotation_as_of', annotation_as_of)]:
+                    if previous.get(field) != expected:
+                        raise ValueError('existing label provenance differs from packet: ' + field)
+    done = {row['video_id'] for row in existing}
+    queue = [row for row in corpus if row['video_id'] not in done]
+    if limit is not None:
+        queue = queue[:limit]
+    print('Blind review; annotation clock: ' + annotation_as_of)
+    print('is_giveaway means an eligible promotional offer, not explicitly closed/expired at this clock.')
+    print('Record genuine closed promotions separately with promotion_exists and availability.')
+    labels_path.parent.mkdir(parents=True, exist_ok=True)
+    with labels_path.open('a', encoding='utf-8') as stream:
+        for item in queue:
+            print('\n' + str(item.get('title') or '') + '\n' + str(item.get('description') or ''))
+            print('video_id=' + item['video_id'] + ' | published=' + str(item.get('published_at') or ''))
+            answer = _explicit('Eligible giveaway at annotation clock? [y/n/s/q] > ', ('y', 'n', 's', 'q'))
+            if answer == 'q':
+                break
+            if answer == 's':
+                continue
+            eligible = answer == 'y'
+            promotion = True if eligible else _explicit('Does a genuine promotion exist, even if closed? [y/n] > ', ('y', 'n')) == 'y'
+            availability = 'not_applicable'
+            if promotion:
+                options = ('active', 'unknown') if eligible else ('active', 'expired', 'closed', 'unknown')
+                availability = _explicit('Availability at annotation clock? [' + '/'.join(options) + '] > ', options)
+            reviewed_at = _utcnow().isoformat()
+            label = dict(video_id=item['video_id'], is_giveaway=eligible, promotion_exists=promotion,
+                         availability=availability, prize=None, deadline=None, howto=None,
+                         reviewer=reviewer, reviewed_at=reviewed_at, labelled_at=reviewed_at,
+                         annotation_as_of=annotation_as_of, review_mode='blind', label_source='human')
+            for field in ('group_id', 'source_snapshot_sha256'):
+                if field in item:
+                    label[field] = item[field]
+            if 'suggested_split' in item:
+                label['split'] = item['suggested_split']
+            if promotion:
+                label['prize'] = _blind_text('prize')
+                label['deadline'] = _blind_text('deadline')
+                label['howto'] = _blind_text('howto')
+            stream.write(json.dumps(label, ensure_ascii=False) + '\n')
+            stream.flush()
+    return 0
+
+
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--corpus", type=Path, default=ROOT / "data" / "corpus.jsonl")
-    ap.add_argument("--labels", type=Path, default=ROOT / "data" / "labels.jsonl")
+    ap.add_argument("--labels", type=Path)
+    ap.add_argument("--packet", type=Path, help="review a validated packet, always blind")
+    ap.add_argument("--reviewer", help="human reviewer identity (required with --packet)")
+    ap.add_argument("--blind", action="store_true", help="hide guesses for a legacy corpus")
     ap.add_argument("--limit", type=int, default=None, help="stop after this many items")
     ap.add_argument("--only-guessed-giveaway", action="store_true",
                     help="only show items the extractor calls a giveaway (audits precision)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+    if args.limit is not None and args.limit < 0:
+        ap.error('--limit must be nonnegative')
+    if (args.packet or args.blind) and args.only_guessed_giveaway:
+        ap.error('--only-guessed-giveaway is incompatible with blind review')
+    if args.packet and not (args.reviewer and args.reviewer.strip()):
+        ap.error('--reviewer is required for packet review')
+    args.labels = args.labels or ((args.packet / 'human_labels.jsonl') if args.packet else ROOT / 'data' / 'labels.jsonl')
+    protected = [args.corpus] if not args.packet else [args.packet / name for name in ('manifest.json', 'corpus.jsonl', 'assignments.jsonl')]
+    if args.labels.resolve() in {path.resolve() for path in protected}:
+        ap.error('human labels must be separate from packet and corpus files')
+    if args.packet or args.blind:
+        try:
+            corpus, clock = load_packet(args.packet) if args.packet else (load_jsonl(args.corpus), _utcnow().isoformat())
+            return run_blind(corpus, args.labels, reviewer=args.reviewer, annotation_as_of=clock,
+                             limit=args.limit, packet=bool(args.packet))
+        except (ValueError, KeyError, TypeError, OSError) as error:
+            print('Review refused: ' + str(error), file=sys.stderr)
+            return 2
 
     corpus = load_jsonl(args.corpus)
     if not corpus:

@@ -1,0 +1,14 @@
+.git
+.env
+.env.*
+.venv
+**/node_modules
+frontend/dist
+data
+config/watchlist.json
+**/*.ingestion.lock
+*.db
+*.db.*
+*.db.old
+**/__pycache__
+.pytest_cache

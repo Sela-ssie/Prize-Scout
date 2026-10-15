@@ -30,7 +30,7 @@ from typing import Dict, List, Optional
 import dateparser
 from dateparser.search import search_dates
 
-EXTRACTOR_VERSION = "2.3.0"
+EXTRACTOR_VERSION = "2.4.3"
 
 _WEIGHTS_PATH = Path(__file__).resolve().parents[1] / "extractor_weights.json"
 
@@ -169,10 +169,14 @@ PRIZE_ITEM_PATTERNS = {
     "GPU": r"rtx\s*\d{4}|geforce|radeon\s+rx\s*\d{4}",
     "gift card": r"gift\s?cards?|giftcards?",
     "cash": r"\bcash\b|\bmoney\b",
+    "automotive": r"(?:car|auto(?:motive)?)\s+(?:detailing\s+)?(?:kits?|accessories|care\s+kits?)|floor[-\s]+mats?|dash\s*cam|tires?|tyres?|tool\s+(?:sets?|kits?)",
     "car": r"\bcar\b|corvette|mustang|tesla",
-    "bike": r"\bbike\b|motorcycle|scooter",
+    "bike": r"\bbikes?\b|bicycles?|motorcycle|scooter",
     "drone": r"\bdrone\b",
-    "camera": r"\bcamera\b|\bgopro\b|\bdslr\b",
+    "archery": r"(?:[A-Za-z][\w-]*\s+[A-Z]\d[\w-]*\s+)?compound\s+bows?|(?:archery|bow)(?:\s+(?:products|\d+[- ]inch|front[- ]facing)){0,3}\s+stabilizers?",
+    "camera": r"trail\s+cameras?|\bcameras?\b|\bgopro\b|\bdslr\b",
+    # Match furniture compounds first so a TV stand is not reduced to electronics.
+    "furniture": r"tv\s+stands?|coffee\s+tables?|chairs?|desks?",
     "TV": r"\btv\b|television|smart\s+tv",
     "headphones": r"headphones|earbuds",
     "smartwatch": r"smart\s?watch|apple\s+watch",
@@ -181,9 +185,21 @@ PRIZE_ITEM_PATTERNS = {
     "diamonds": r"\bdiamonds?\b",
     "merch": r"\bmerch\b|merchandise",
     "console": r"\bconsole\b",
+    "board games": r"board\s+games?",
+    # Concrete goods and experiences only. Keep this an allowlist: arbitrary text after
+    # "win" includes reviews, slogans and SEO rather than necessarily naming a prize.
+    "books": r"(?:signed\s+)?(?:books?|novels?|cookbooks?)(?:\s+(?:bundle|set))?|box(?:ed)?\s+set\s+of\s+books",
+    "beauty": r"(?:makeup|cosmetics?|skincare|skin\s+care|beauty)\s+(?:sets?|kits?|bundles?|hampers?)|perfume|fragrance|lipstick|eyeshadow\s+palette|hair\s+dryer",
+    "fashion": r"handbags?|sneakers?|trainers|hoodies?|t-shirts?|jackets?|jewel(?:lery|ry)|necklaces?|bracelets?|earrings?",
+    "home": r"air\s+fryer|stand\s+mixer|blender|coffee\s+(?:maker|machine)|espresso\s+machine|cookware(?:\s+set)?|vacuum(?:\s+cleaner)?|bedding\s+set|duvet|sofa|home\s+decor\s+(?:set|bundle)",
+    "food": r"(?:food|snack|chocolate|coffee|tea)\s+(?:hampers?|baskets?|bundles?|boxes|box)|restaurant\s+(?:vouchers?|meals?)|meal\s+kits?|chocolates?",
+    "travel": r"(?:all[- ]inclusive\s+)?(?:trips?|holidays?|vacations?)\s+(?:to|for)\s+(?:two|[A-Z][a-z]+)|weekend\s+(?:getaways?|breaks?)|hotel\s+(?:stays?|vouchers?)|cruises?|(?:concert|festival|theat(?:er|re)|cinema|theme\s+park|sporting\s+event)\s+tickets?|spa\s+(?:days?|vouchers?)",
+    "outdoors": r"(?:camping\s+)?tents?|sleeping\s+bags?|hiking\s+(?:boots?|backpacks?)|fishing\s+(?:rods?|reels?|tackle)|(?:golf|tennis)\s+(?:clubs?|rackets?|racquets?|sets?)|footballs?|basketballs?|yoga\s+mats?|paddleboards?|kayaks?",
+    "crafts": r"sewing\s+machines?|(?:art|painting|drawing|craft|knitting|crochet)\s+(?:supplies|sets?|kits?|bundles?)|yarn\s+(?:bundles?|sets?)|watercolou?r\s+(?:sets?|paints?)",
+    "pet supplies": r"(?:dog|cat|pet)\s+(?:food|treats?|toys?|beds?|supplies|hampers?|bundles?)|aquariums?|cat\s+trees?",
 }
 ITEM_RE = re.compile(
-    "|".join(f"(?P<{k.replace(' ', '_').replace('-', '_')}>{v})" for k, v in PRIZE_ITEM_PATTERNS.items()),
+    r"\b(?:" + "|".join(f"(?P<{k.replace(' ', '_').replace('-', '_')}>{v})" for k, v in PRIZE_ITEM_PATTERNS.items()) + r")\b",
     re.IGNORECASE,
 )
 _GROUP_TO_ITEM = {k.replace(" ", "_").replace("-", "_"): k for k in PRIZE_ITEM_PATTERNS}
@@ -373,15 +389,62 @@ OFFER_CUE_RE = re.compile(
 )
 
 
+# Award lists may follow instructions without repeating "win" for every item.
+# A list cue alone never establishes an offer, and footer/review text ends scope.
+_AWARD_LIST_RE = re.compile(
+    r'^(?:[-*•]\s*|\d+[.)]\s*|there\s+will\s+be\s+(?:a|an|one|two|three|\d+)\b'
+    r'|(?:the\s+)?(?:prizes?|awards?)\s*(?::|include\b|are\b)'
+    r'|(?:a|an|one|two|three|\d+)\s+)', re.I,
+)
+_NONAWARD_LIST_RE = re.compile(r'\b(?:reviews?|reviewing|testing|comparison|compare|accessories|affiliate|discount|buy|shop|purchase)\b', re.I)
+_AWARD_NOUN_RE = re.compile(r'\b(?:prizes?|giveaways?|contest|sweepstakes)\b', re.I)
+_AWARD_ALLOCATION_RE = re.compile(r'\b(?:winners?\s+for|each\s+(?:getting|gets?)\s+to\s+(?:pick|choose))\b', re.I)
+_AWARD_LINK_RE = re.compile(r'\b(?:will|can|could)\s+win\b|\b(?:correct|right)\s+(?:answers?|responses?)\b[^.!?]{0,70}\bwin\b', re.I)
+_PRIZE_FOOTER_RE = re.compile(
+    r'^(?:affiliate\s+links?|shop\b|buy\b|products?\s+(?:used|featured|reviewed)|'
+    r'links?\s+to\s+(?:see|buy|shop)|accessor(?:y|ies)\s+reviews?)\b'
+    r'|\b(?:affiliate\s+links?|discount\s+code|coupon\s+code)\b', re.I,
+)
+_AWARD_BRIDGE_RE = re.compile(
+    r'\b(?:you\s+(?:need\s+to|must|have\s+to)|(?:i|we)\s+will\s+ask|'
+    r'correct\s+answers?|right\s+answers?|if\s+you|to\s+enter|how\s+to\s+enter)\b', re.I,
+)
+
+
 def _prize_candidates(text: str) -> List[str]:
     out = []
+    remaining, characters = 0, 0
+    numbered = False
     for seg in _segments(text):
-        if is_tag_dump(seg):
+        if re.fullmatch(r'\d+[.)]', seg):
+            numbered = bool(remaining)
+            continue
+        if is_tag_dump(seg) or _PRIZE_FOOTER_RE.search(seg):
+            remaining = 0
             continue
         if NEAR_NEGATION_RE.search(seg) and PRIZE_RE.search(seg):
+            remaining = 0
             continue
-        if PRIZE_RE.search(seg) or STRONG_PHRASE_RE.search(seg) or OFFER_CUE_RE.search(seg):
+        mentions = list(ITEM_RE.finditer(seg))
+        if mentions and _AWARD_ALLOCATION_RE.search(seg) and all(
+            any(re.search(r'(?<!\w)' + re.escape(mention.group().removesuffix('s')) + r's?(?!\w)', prior, re.I)
+                for prior in out) for mention in mentions
+        ):
+            continue  # Repeated winner/allocation prose is not another prize.
+        direct = bool(PRIZE_RE.search(seg) or STRONG_PHRASE_RE.search(seg) or OFFER_CUE_RE.search(seg))
+        listed = bool(remaining and characters + len(seg) <= 1200 and (numbered or _AWARD_LIST_RE.search(seg))
+                      and ITEM_RE.search(seg) and not _NONAWARD_LIST_RE.search(seg))
+        numbered = False
+        if direct or listed:
             out.append(seg)
+        anchor = bool(FIRST_PERSON_OFFER_RE.search(seg) or OFFER_CUE_RE.search(seg) or (_AWARD_LINK_RE.search(seg) and _AWARD_NOUN_RE.search(seg)))
+        if anchor:
+            remaining, characters = 6, 0
+        elif remaining:
+            remaining -= 1
+            characters += len(seg)
+            if not (listed or _AWARD_BRIDGE_RE.search(seg)):
+                remaining = 0
     return out
 
 
@@ -416,6 +479,11 @@ def extract_prizes(text: str, include_money_labels: bool = True) -> List[Dict]:
         for money_index, (mm, value) in enumerate(monies):
             backward_cue = bool(_VALUE_CUE_RE.search(seg[max(0, mm.start() - 16): mm.start()]))
             for item_index, (start, end, _) in enumerate(items):
+                # Enforce the spatial window before adding the directional penalty.
+                # Otherwise forward matches can stretch 145 characters while backward
+                # matches get only 45, attaching remote amounts to unrelated goods.
+                if max(start - mm.end(), mm.start() - end, 0) > 45:
+                    continue
                 if start <= mm.start() <= end:
                     distance = 0.0
                 elif start >= mm.end():
@@ -569,16 +637,98 @@ def find_deadline(
 # How to enter
 # --------------------------------------------------------------------------------------
 
+_ENTRY_INSTRUCTION_RE = re.compile(
+    r'\b(?:how|steps)\s+to\s+enter\b|\bto\s+enter\b'
+    r'|\benter\s+(?:by|here|at|via|to\s+win|the\s+(?:giveaway|contest|sweepstakes))\b'
+    r'|\bparticipat(?:e|ing)\s+by\b'
+    r'|\b(?:giveaway|contest|sweepstakes|entry)\s+(?:rules|instructions|steps)\b'
+    r'|\bfor\s+(?:(?:an?|one|extra)\s+)?entr(?:y|ies)\b'
+    r'|\bfor\s+a\s+chance\s+to\s+win\b'
+    r'|\ball\s+you\s+(?:need|have)\s+to\s+do\b'
+    r'|\bentry\s+is\s+(?:completely\s+)?free\b', re.I,
+)
+_ENTRY_HEADING_RE = re.compile(
+    r'^(?:how\s+to\s+enter|steps\s+to\s+enter|to\s+enter'
+    r'|(?:giveaway|contest|sweepstakes|entry)\s+(?:rules|instructions|steps))\s*[:!\-–—]?$', re.I,
+)
+_ENTRY_METHOD_RE = re.compile(r'\b(?:submit|fill|complete|visit|register|sign\s+up|enter\s+(?:here|at|via))\b', re.I)
+_PROMOTION_PURPOSE_RE = re.compile(r'\bfor\s+more\b|\bstay\s+tuned\b|\bsupport\s+(?:the|our|my)\s+channel\b', re.I)
+_SOCIAL_FOOTER_RE = re.compile(r'\bon\s+(?:all\s+)?social\s+media\b|\bfollow\s+me\s+on\b', re.I)
+
+
+_REQUIRED_CONDITION_RE = re.compile(
+    r'\b(?:you|entrants?|participants?)\s+(?:will\s+)?'
+    r'(?:need\s+to|must|have\s+to|are\s+required\s+to)\s+\w+', re.I,
+)
+_WINNING_CONDITION_RE = re.compile(
+    r'\bif\s+you\b[^.!?]{0,120}\byou\s+(?:will\s+)?win\b'
+    r'|\b(?:correct|right)\s+(?:answers?|responses?)\b[^.!?]{0,80}\b(?:win|wins|prize)\b'
+    r'|\b(?:to|and)\s+win\b', re.I,
+)
+_CONDITION_BRIDGE_RE = re.compile(r'\b(?:i|we)\s+(?:will|shall)\s+ask\b', re.I)
+
+
 def find_howto(text: str) -> Optional[str]:
+    """Require local entry context; titles never turn channel footers into rules.
+
+    Blank paragraphs and unrelated sentences end an instruction section. A direct
+    offer may introduce adjacent imperative steps, while explicit entry wording
+    can establish a new section anywhere in the source.
+    """
     collected = []
-    for seg in _segments(text):
-        if is_tag_dump(seg):
-            continue
-        if not HOWTO_RE.search(seg):
-            continue
-        imperative = any(_is_imperative_action(seg, m.start()) for m in ACTION_RE.finditer(seg))
-        if imperative or ENTRY_RE.search(seg):
-            collected.append(_tidy(seg))
+    for block in re.split(r'\n\s*\n', text):
+        entry_section = offer_context = False
+        segments = _segments(block)
+        condition_tail = -1
+        for index, seg in enumerate(segments):
+            if re.fullmatch(r'\d+[.)]', seg):
+                continue  # Sentence splitting can separate numbered-list markers.
+            if is_tag_dump(seg) or _PRIZE_FOOTER_RE.search(seg):
+                entry_section = offer_context = False
+                condition_tail = -1
+                continue
+            if _ENTRY_HEADING_RE.fullmatch(seg):
+                entry_section, offer_context = True, False
+                continue
+            # A required action plus a nearby explicit winning consequence is
+            # meaningful even without social verbs. Never search across paragraphs,
+            # affiliate sections, or unrelated filler to manufacture a condition.
+            window = []
+            for following in segments[index:index + 3]:
+                if _PRIZE_FOOTER_RE.search(following) or _PROMOTION_PURPOSE_RE.search(following):
+                    break
+                window.append(following)
+                if _WINNING_CONDITION_RE.search(following):
+                    break
+                if len(window) > 1 and not _CONDITION_BRIDGE_RE.search(following):
+                    break
+            winning = bool(window and _WINNING_CONDITION_RE.search(window[-1]))
+            required = bool(_REQUIRED_CONDITION_RE.search(seg))
+            method = any(_is_imperative_action(seg, match.start()) for match in _ENTRY_METHOD_RE.finditer(seg))
+            recent_offer = bool(FIRST_PERSON_OFFER_RE.search(seg) or OFFER_CUE_RE.search(seg))
+            for prior in reversed(segments[max(0, index - 3):index]):
+                if _PRIZE_FOOTER_RE.search(prior):
+                    break
+                if FIRST_PERSON_OFFER_RE.search(prior) or OFFER_CUE_RE.search(prior) or (_AWARD_LINK_RE.search(prior) and _AWARD_NOUN_RE.search(prior)):
+                    recent_offer = True
+                    break
+                if not (_AWARD_BRIDGE_RE.search(prior) or _AWARD_LIST_RE.search(prior) or _CONDITION_BRIDGE_RE.search(prior)):
+                    break
+            conditional = winning and recent_offer and (required or (method and (entry_section or offer_context)))
+            if conditional:
+                condition_tail = index + len(window) - 1
+            continuation = index <= condition_tail
+            linked = bool(_ENTRY_INSTRUCTION_RE.search(seg))
+            action = bool(ACTION_RE.search(seg) or _ENTRY_METHOD_RE.search(seg))
+            imperative = any(_is_imperative_action(seg, m.start()) for m in ACTION_RE.finditer(seg))
+            contextual = imperative and (entry_section or offer_context)
+            generic = _PROMOTION_PURPOSE_RE.search(seg) or (not entry_section and _SOCIAL_FOOTER_RE.search(seg))
+            if continuation or (linked and action) or (contextual and not generic):
+                collected.append(_tidy(seg))
+                entry_section = True
+            else:
+                entry_section = False
+            offer_context = bool(FIRST_PERSON_OFFER_RE.search(seg) or OFFER_CUE_RE.search(seg))
     if not collected:
         return None
     return " ".join(collected[:3])[:500]
@@ -840,6 +990,11 @@ def extract_giveaways_from_description(
 ) -> Optional[Dict]:
     """Backwards-compatible wrapper: returns None when this is not a giveaway."""
     res = extract(text, published_at=published_at, now=now, title=title)
+    return giveaway_payload(res)
+
+
+def giveaway_payload(res: Dict) -> Optional[Dict]:
+    """Convert one full analysis to storage fields without running extraction twice."""
     if not res["is_giveaway"]:
         return None
     return {

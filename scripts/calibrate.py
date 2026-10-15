@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src import extractor as E  # noqa: E402
-from scripts.eval import build_dataset, load_jsonl, fixture_now  # noqa: E402
+from scripts.eval import build_dataset, load_jsonl, fixture_now, row_clock, aware_clock  # noqa: E402
 
 WEIGHTS_PATH = ROOT / "extractor_weights.json"
 MIN_LABELS = 60
@@ -39,7 +39,7 @@ def featurise(row, now):
     runtime ones. Fitting on features extract() never computes would silently produce
     weights for a model that does not exist."""
     return E.analyse(row["text"], title=row.get("title", ""),
-                     published_at=row["published_at"], now=now)["features"]
+                     published_at=row["published_at"], now=row_clock(row, now))["features"]
 
 
 def split(rows, holdout_fraction=0.4):
@@ -50,6 +50,10 @@ def split(rows, holdout_fraction=0.4):
     """
     if not 0 < holdout_fraction < 1:
         raise ValueError("holdout must be between zero and one")
+    assigned = [row['label'].get('split') for row in rows]
+    frozen = any(value is not None for value in assigned)
+    if frozen and any(value not in ('train', 'validation', 'test') for value in assigned):
+        raise ValueError('refusing mixed assigned/unassigned or invalid calibration splits')
     parents = list(range(len(rows)))
     def root(i):
         while parents[i] != i:
@@ -65,9 +69,16 @@ def split(rows, holdout_fraction=0.4):
         keys = ["id:" + row["video_id"]]
         if content:
             keys.append("text:" + hashlib.sha256(content.encode()).hexdigest())
-        campaign = row["label"].get("campaign_id") or row["label"].get("group_id")
-        if campaign:
-            keys.append("campaign:" + str(campaign))
+        for field in ('campaign_id', 'group_id'):
+            campaign = row['label'].get(field)
+            if campaign:
+                keys.append('campaign:' + str(campaign))
+        if frozen:
+            # Match packet normalization, catching changed title/punctuation too.
+            import unicodedata
+            normalized = ' '.join(re.findall(r'\w+', unicodedata.normalize('NFKC', row.get('text', '')).casefold()))
+            if normalized:
+                keys.append('normalized-text:' + hashlib.sha256(normalized.encode()).hexdigest())
         keys_by_row.append(keys)
         for key in keys:
             if key in seen:
@@ -78,6 +89,13 @@ def split(rows, holdout_fraction=0.4):
         groups.setdefault(root(i), []).append((row, keys_by_row[i]))
     train, validation, test = [], [], []
     for group in groups.values():
+        if frozen:
+            group_splits = {row['label']['split'] for row, _ in group}
+            if len(group_splits) != 1:
+                raise ValueError('cross-group or duplicate split leakage in frozen assignments')
+            destination = {'train': train, 'validation': validation, 'test': test}[group_splits.pop()]
+            destination.extend(row for row, _ in group)
+            continue
         # Prefer explicit campaign key, then source fingerprint, then video ID.
         keys = sorted({key for _, keys in group for key in keys})
         key = next((k for k in keys if k.startswith("campaign:")), None)
@@ -95,7 +113,7 @@ def runtime_scores(rows, weights, bias, now):
     scores = []
     for row in rows:
         result = E.extract(row["text"], title=row.get("title", ""),
-                           published_at=row["published_at"], now=now, weights=model)
+                           published_at=row["published_at"], now=row_clock(row, now), weights=model)
         scores.append(result["confidence"] if result["is_giveaway"] else -1.0)
     return scores
 
@@ -144,7 +162,7 @@ def pick_threshold(scores, targets, target_precision):
     return best if best is not None else (None, 0.0, 0.0)
 
 
-def main() -> int:
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--labels", type=Path, default=ROOT / "data" / "labels.jsonl")
     ap.add_argument("--corpus", type=Path, default=ROOT / "data" / "corpus.jsonl")
@@ -156,9 +174,13 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--min-labels", type=int, default=MIN_LABELS,
                     help="lower only to exercise the fitting path; fitting on few labels overfits")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
-    labels = load_jsonl(args.labels)
+    try:
+        labels = load_jsonl(args.labels)
+    except (ValueError, OSError) as error:
+        print('Calibration refused: ' + str(error), file=sys.stderr)
+        return 2
     if not labels:
         print(f"no labels at {args.labels}. Run scripts/collect_corpus.py then scripts/label.py.",
               file=sys.stderr)
@@ -168,7 +190,14 @@ def main() -> int:
            for label in labels if label.get("video_id") != "_readme"):
         print("refusing provisional annotations; adjudicate and record reviewed provenance first", file=sys.stderr)
         return 2
-    rows, missing = build_dataset(labels, {i["video_id"]: i for i in load_jsonl(args.corpus)})
+    try:
+        corpus = load_jsonl(args.corpus)
+        if len({row['video_id'] for row in corpus}) != len(corpus):
+            raise ValueError('duplicate source corpus video IDs')
+        rows, missing = build_dataset(labels, {i['video_id']: i for i in corpus})
+    except (ValueError, KeyError, TypeError, OSError) as error:
+        print('Calibration refused: ' + str(error), file=sys.stderr)
+        return 2
     if missing:
         print("labels missing source text; refusing incomplete fit", file=sys.stderr)
         return 2
@@ -179,14 +208,13 @@ def main() -> int:
         return 2
 
     try:
-        now = datetime.fromisoformat(args.now.replace("Z", "+00:00")) if args.now else fixture_now(labels)
-        if now is not None and now.tzinfo is None:
-            now = now.replace(tzinfo=timezone.utc)
-    except ValueError:
-        print("--now must be an ISO datetime", file=sys.stderr)
-        return 2
-    if now is None:
-        print("supply --now to pin availability and relative-date features", file=sys.stderr)
+        now = aware_clock(args.now) if args.now else (None if any(row['label'].get('annotation_as_of') for row in rows) else fixture_now(labels))
+        if now is None and any(not row['label'].get('annotation_as_of') for row in rows):
+            raise ValueError('supply --now to pin availability and relative-date features for legacy labels')
+        for row in rows:
+            row_clock(row, now)
+    except (ValueError, KeyError, TypeError) as error:
+        print('Calibration refused: ' + str(error), file=sys.stderr)
         return 2
     feature_names = list(E.DEFAULT_WEIGHTS["weights"])
     try:
@@ -233,7 +261,8 @@ def main() -> int:
         "_comment": "Fitted by scripts/calibrate.py. Do not hand-edit to move eval numbers; refit.",
         "fitted_on": datetime.now(timezone.utc).isoformat(),
         "n_train": len(train),
-        "reference_now": now.isoformat(),
+        "reference_now": now.isoformat() if now is not None else None,
+        "annotation_clocks": sorted({r["label"]["annotation_as_of"] for r in rows if r["label"].get("annotation_as_of")}),
         "validation": {"n": len(validation), "precision": precision, "recall": recall},
         "test": {"n": len(test), **final},
     }, indent=2) + "\n")

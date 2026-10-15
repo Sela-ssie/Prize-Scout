@@ -1,0 +1,44 @@
+name: Checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m pytest tests/ -q
+      - run: python scripts/eval.py --labels tests/fixtures/seed_labels.jsonl --json
+      - run: python scripts/check_release.py --skip-ui
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm test
+      - run: npm run build
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t prizescout:ci .
+      - run: docker run -d --name prizescout -p 127.0.0.1:8000:8000 -v scout-data:/data prizescout:ci
+      - run: curl --fail --retry 10 --retry-delay 2 --retry-connrefused http://127.0.0.1:8000/api/health
+      - run: docker exec prizescout python scripts/demo.py --check
+      - run: docker exec prizescout python scripts/check_release.py
+      - if: always()
+        run: docker logs prizescout

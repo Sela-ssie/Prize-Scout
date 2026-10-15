@@ -1,22 +1,34 @@
 # PrizeScout — working notes for future sessions
 
+## Project direction
+
+Build a coherent flagship project demonstrating software engineering, data
+engineering and applied ML. Finish the deployable MVP, then evaluate improvements
+in stages with reviewed data and measured results.
+
 ## What this is
 Finds giveaways on YouTube and extracts structured details (prize, deadline, how to enter).
 FastAPI + SQLite backend (`src/`), Vite/React frontend (`frontend/`).
 
 ## The constraint that drives everything: YouTube quota
-YouTube Data API v3 gives **10,000 quota units/day**, total, for the whole application.
+YouTube quota is bounded across the application; user searches must query our index.
+The original project assumed a shared **10,000-unit/day** budget and charged
+`search.list` at 100 units. Google's current quota documentation (checked 2026-10-14)
+describes a separate default bucket of **100 search calls/day**, with a 1-unit cost,
+plus **10,000 units/day for other endpoints**. Check the project's actual Cloud Console
+quotas before spending them: https://developers.google.com/youtube/v3/determine_quota_cost
 
 | Call | Units |
 |---|---|
-| `search.list` | **100** |
+| `search.list` | 1 in its own limited bucket; collector conservatively budgets 100 legacy-equivalent units |
 | `videos.list` | 1 |
 | `playlistItems.list` | 1 |
 | `channels.list` | 1 |
 
-`search.list` is 100x everything else. A single user query that paginates 3 pages of search
-costs ~303 units — that is **33 user searches per day for the entire app**. Any design that
-calls `search.list` per user request cannot ship.
+The collector's existing 100-unit search charge remains a conservative local cap,
+not a claim about current API billing. Do not claim a measured 100x saving from that
+legacy assumption. Production ingestion uses the 1-unit channel/upload/detail APIs,
+and every user search spends **zero YouTube requests** regardless of quota changes.
 
 **Architectural direction:** background ingestion over a curated channel watchlist
 (`playlistItems.list` at 1 unit/call to walk channel uploads), writing into our own index.
@@ -40,8 +52,10 @@ regression to a version.
 - **Phase 1 — make extraction measurable** (done): raw text persisted; bounded-quota corpus
   collector; terminal labeling tool; eval harness with precision/recall/F1 + regression test;
   then extractor fixes measured before/after.
-- **Phase 2+ — not started**: trust scoring, background watchlist ingestion, notifications,
-  second platform. Do not start these without being asked.
+- **Phase 2 — MVP implementation**: local indexed search, background watchlist ingestion,
+  availability handling, frontend filters/error states, CI and deployment packaging.
+  User authorized this phase on 2026-10-14. Notifications, a second platform and
+  independent trust/scam verification remain future scope.
 
 **Priority is precision over recall.** A false positive costs far more user trust than a miss.
 Target >= 0.90 precision on `is_giveaway`. Report the recall cost honestly; never trade
@@ -68,18 +82,29 @@ lower it to make a red build green.
 python scripts/collect_corpus.py --max-units 3000   # ONCE. spends real quota. -> data/corpus.jsonl
 python scripts/label.py                             # human labels. resumable. -> data/labels.jsonl
 python scripts/eval.py                              # precision/recall/F1 + worst false positives
-python scripts/calibrate.py                         # refit confidence weights on a holdout split
+python scripts/calibrate.py --now 2026-10-14T00:00:00Z # requires reviewed labels matching this clock
 ```
 `eval.py` falls back to `tests/fixtures/seed_labels.jsonl` when no real labels exist. Those
 seed fixtures are saturated (the extractor was iterated against them), so treat their 1.0 as
 "the documented v1 bugs are fixed", never as a precision estimate. `calibrate.py` refuses to
-fit on fewer than 60 labels and reports HOLDOUT numbers, never numbers from the training
-split — a few hundred labels against hand-designed features overfits easily.
+fit on fewer than 60 labels and uses grouped train/validation/test splits and a pinned clock, never reporting training
+performance as test quality — a few hundred labels against hand-designed features overfits easily.
 `data/` is gitignored — the corpus is API-cached content and must not be committed (30-day
-rule), and it is large. Collect it once; after that, extractor iteration is free forever.
+rule), and it is large. Reuse retained raw text for offline iteration without API calls; refresh or remove cached
+source data on its retention schedule. Offline re-extraction must never reset fetched_at.
 Never tune the extractor by re-running live searches.
 
 ## Gotchas
+- The extractor takes **title and description**, and the title is deliberately *not*
+  concatenated into the description: `short_text`, `hashtag_ratio` and `is_tag_dump` are
+  ratios over the description, and prepending a title moves all three for every video.
+  Title signals are their own features (`title_strong`, `title_prize_value`, `title_music`)
+  and the title also feeds the negation/closed rejects, because widening what gets admitted
+  is what makes a "GIVEAWAY WINNER ANNOUNCED" title dangerous. Title prizes are named items
+  only — the `_money_label` fallback reads prose but turns "$1200 PC GIVEAWAY!" into the
+  prize "PC GIVEAWAY". `title_only` on the result marks a detection the description alone
+  would have missed. Nothing new needs persisting: `title` and `raw_description` are both
+  stored, so any of this is recomputable without spending quota.
 - Keyword lists must use word-boundary regexes. `"win" in text` matches *viewing, twin,
   window, rewind, drawing, swing, winter* — this is how an attorney-client disclaimer got
   stored as a PRIZE. Every keyword list is precompiled in `src/extractor.py`; add to the
@@ -88,3 +113,7 @@ Never tune the extractor by re-running live searches.
   sentences and must be rejected before extraction, not after.
 - `frontend/vite.config.mjs` is the only vite config and deliberately omits
   `@vitejs/plugin-react` (esbuild handles JSX; no Fast Refresh). Don't re-add a `.js` twin.
+  Vite is pinned to 7.3.7; use Node.js 22.12+ and retain the explicit browser targets
+  when upgrading. CI runs `npm audit --audit-level=high`.
+- SQLite returns naive `fetched_at` values despite UTC writes. API responses must
+  restore the UTC offset so browsers do not treat the timestamp as local time.

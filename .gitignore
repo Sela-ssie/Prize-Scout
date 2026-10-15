@@ -12,3 +12,6 @@ data/
 .DS_Store
 prizes.db.old
 *.db.old
+frontend/dist/
+config/watchlist.json
+*.ingestion.lock

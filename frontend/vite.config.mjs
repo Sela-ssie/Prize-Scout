@@ -1,7 +1,10 @@
 import { defineConfig } from 'vite'
 
 export default defineConfig({
-  // Not using @vitejs/plugin-react to avoid ESM-only plugin loading issues
+  // esbuild handles JSX; this app does not need the React build plugin.
+  build: {
+    target: ['es2020', 'edge88', 'firefox78', 'chrome87', 'safari14']
+  },
   server: {
     port: 5173,
     proxy: {

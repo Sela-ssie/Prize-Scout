@@ -1,0 +1,28 @@
+services:
+  web:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      DATABASE_URL: sqlite:////data/prizes.db
+    volumes:
+      - scout-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  ingest:
+    build: .
+    profiles: [ingestion]
+    command: ["python", "scripts/ingest.py", "--watchlist", "/config/watchlist.json", "--max-units", "200", "--daily-max-units", "2000", "--max-pages", "2", "--interval", "3600"]
+    environment:
+      DATABASE_URL: sqlite:////data/prizes.db
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
+    volumes:
+      - scout-data:/data
+      - ./config/watchlist.json:/config/watchlist.json:ro
+    restart: unless-stopped
+volumes:
+  scout-data:
