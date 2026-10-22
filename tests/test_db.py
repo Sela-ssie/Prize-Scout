@@ -43,21 +43,25 @@ def test_timestamps_are_timezone_aware(tmp_path):
     assert row.fetched_at.utcoffset() == timezone.utc.utcoffset(None)
 
 
-def test_outdated_schema_is_rejected(tmp_path):
-    """A pre-Phase-0 database must fail loudly, not silently accumulate duplicates."""
+def test_outdated_schema_is_upgraded_without_losing_data(tmp_path):
+    """Legacy rows survive additive upgrades and become refresh candidates."""
     import sqlite3
 
     path = tmp_path / "legacy.db"
     con = sqlite3.connect(path)
     con.execute("CREATE TABLE video (id INTEGER NOT NULL PRIMARY KEY, video_id VARCHAR NOT NULL, title VARCHAR, url VARCHAR)")
     con.execute("CREATE TABLE giveaway (id INTEGER NOT NULL PRIMARY KEY, video_id VARCHAR NOT NULL, prizes VARCHAR, deadline VARCHAR, howto VARCHAR)")
+    con.execute("INSERT INTO video(video_id,title) VALUES ('legacy','Original')")
+    con.execute("INSERT INTO giveaway(video_id,prizes) VALUES ('legacy','Camera')")
     con.commit()
     con.close()
 
-    import pytest
-
-    with pytest.raises(RuntimeError, match="outdated schema"):
-        db.create_db_and_tables(f"sqlite:///{path}")
+    engine = db.create_db_and_tables(f"sqlite:///{path}")
+    with db.get_sync_session(engine) as session:
+        assert session.exec(select(db.Video)).one().title == "Original"
+        assert session.exec(select(db.Giveaway)).one().prizes == "Camera"
+        assert session.exec(select(db.Giveaway)).one().availability == "unknown"
+    db.create_db_and_tables(f"sqlite:///{path}")
 
 
 def test_raw_description_and_confidence_are_persisted(tmp_path):
@@ -92,3 +96,20 @@ def test_raw_description_and_confidence_are_persisted(tmp_path):
     assert g.extractor_version == "2.0.0"
     import json as _json
     assert _json.loads(g.prizes_json) == extracted["prizes_structured"]
+
+
+def test_duplicate_legacy_rows_are_archived_before_consolidation(tmp_path):
+    import sqlite3
+    path = tmp_path / 'duplicates.db'
+    con = sqlite3.connect(path)
+    con.execute('CREATE TABLE video (id INTEGER PRIMARY KEY, video_id VARCHAR, title VARCHAR)')
+    con.execute("INSERT INTO video VALUES (1, 'v', 'First')")
+    con.execute("INSERT INTO video VALUES (2, 'v', 'Latest')")
+    con.commit()
+    con.close()
+    engine = db.create_db_and_tables(f'sqlite:///{path}')
+    with db.get_sync_session(engine) as session:
+        assert session.exec(select(db.Video)).one().title == 'Latest'
+    con = sqlite3.connect(path)
+    assert con.execute('SELECT title FROM video_legacy_archive').fetchone()[0] == 'First'
+    con.close()

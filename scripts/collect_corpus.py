@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env")
 
+# Conservative legacy-equivalent cap; current search has a separate API quota bucket.
 SEARCH_COST = 100
 VIDEOS_COST = 1
 BASE = "https://www.googleapis.com/youtube/v3"
@@ -33,22 +34,32 @@ BASE = "https://www.googleapis.com/youtube/v3"
 # Deliberately varied: obvious giveaways, ambiguous phrasing, and queries that will
 # return non-giveaways. A corpus of only true positives cannot measure precision.
 DEFAULT_QUERIES = [
-    "giveaway",
-    "enter to win",
-    "free giveaway 2026",
-    "iphone giveaway",
-    "gaming pc giveaway",
-    "gift card giveaway",
-    "sweepstakes contest",
-    "win a car",
-    "subscriber giveaway winner announcement",
-    "raffle prize draw",
-    "unboxing review",          # near-miss: mentions prizes, not a giveaway
+    # Mix categories AND negatives from the start: target/quota caps often stop the
+    # run before the end of this list. Never front-load a block of tech positives.
+    "book giveaway",
+    "unboxing review affiliate offers",  # near-miss, not an entry offer
+    "travel experience giveaway",
+    "giveaway winner announcement",      # already closed
+    "kitchen giveaway",
+    "how to win at chess",               # non-prize use of win
+    "beauty giveaway",
+    "cash giveaway",
+    "fashion giveaway",
+    "food hamper giveaway",
+    "camping giveaway",
+    "art supplies giveaway",
+    "pet supplies giveaway",
+    "car accessories giveaway",
+    "electronics giveaway",
+    "gift card sweepstakes",
+    "skincare makeup giveaway",
+    "sneaker giveaway",
+    "air fryer giveaway",
+    "concert tickets giveaway",
     "product review giveaway mention",
-    "how to win at chess",      # 'win' as a verb, must not be a giveaway
-    "winter vlog",              # substring trap for the old 'win' bug
-    "twin turbo build",         # substring trap
-    "official music video",     # must be rejected
+    "winter vlog",                       # substring traps
+    "twin turbo build",
+    "official music video",
 ]
 
 

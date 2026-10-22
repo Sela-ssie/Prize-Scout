@@ -1,14 +1,38 @@
+# Python
 venv/
 .venv/
 __pycache__/
-.env
 *.pyc
-node_modules/
-frontend/node_modules/
-prizes.db
-*.db
-data/
 .pytest_cache/
-.DS_Store
-prizes.db.old
+
+# Frontend
+node_modules/
+frontend/dist/
+
+# Local configuration and data
+.env
+*.db
+*.db-*
 *.db.old
+data/
+config/watchlist.json
+*.ingestion.lock
+.DS_Store
+
+# Local tooling and session notes
+.claude/
+.codex/
+.cursor/
+.windsurf/
+.continue/
+.aider*
+.cursorrules
+.cursorignore
+.windsurfrules
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+AGENTS.local.md
+GEMINI.md
+/.github/copilot-instructions.md
+/PROJECT_STATUS.md
