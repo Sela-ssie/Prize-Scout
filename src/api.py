@@ -1,90 +1,53 @@
-from fastapi import APIRouter, Query
-from .youtube_client import YouTubeClient
-from .extractor import extract_giveaways_from_description
-from typing import List
+"""Local index API. User requests never consume YouTube quota."""
 import os
+from functools import lru_cache
+from typing import Literal
+from fastapi import APIRouter, Query, Request
+from sqlalchemy import func
+from sqlmodel import Session, select
 from . import db
-from concurrent.futures import ThreadPoolExecutor
-import asyncio
+from .categories import Category
 
 router = APIRouter()
 
-YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
-yt = YouTubeClient(api_key=YOUTUBE_API_KEY)
 
-# optional sync DB engine. We will run DB writes in a thread to avoid blocking
-DATABASE_URL = os.environ.get("DATABASE_URL")
-# Default to SQLite file in project root if DATABASE_URL not provided
-if not DATABASE_URL:
-    DATABASE_URL = 'sqlite:///./prizes.db'
-
-sync_engine = db.create_db_and_tables(DATABASE_URL)
-db_executor = ThreadPoolExecutor(max_workers=2)
+@lru_cache(maxsize=1)
+def get_engine():
+    return db.create_db_and_tables(os.getenv('DATABASE_URL', 'sqlite:///./prizes.db'))
 
 
-@router.get("/search")
-async def search(q: str = Query(..., min_length=1), max_results: int = 50):
-    """Search YouTube for videos matching query and extract giveaway details from descriptions."""
-    
-    # Search for maximum videos allowed by YouTube API
-    # Since we filter aggressively, we need to search many to get enough results
-    search_count = 150  # With pagination, we can fetch multiple pages of 50 each
-    videos = await yt.search_videos(q, max_results=search_count)
-
-    results = []
-    for v in videos:
-        # Stop if we already have enough results
-        if len(results) >= max_results:
-            break
-            
-        desc = v.get("description", "")
-        extracted = extract_giveaways_from_description(desc)
-        if extracted:
-            # attach video link and title
-            extracted["video_title"] = v.get("title")
-            extracted["video_id"] = v.get("id")
-            extracted["video_url"] = f"https://www.youtube.com/watch?v={v.get('id')}"
-            extracted["published_at"] = v.get("published_at")  # Add published date
-            
-            # Remove confidence from response (internal use only)
-            confidence = extracted.pop("confidence", None)
-            
-            results.append(extracted)
-
-            # persist if DB available (run in thread)
-            if sync_engine is not None:
-                try:
-                    video_row = {"id": v.get('id'), "title": v.get('title'), "url": extracted["video_url"]}
-
-                    loop = asyncio.get_running_loop()
-                    # schedule sync save to run in threadpool
-                    await loop.run_in_executor(db_executor, db.save_giveaway_sync, sync_engine, video_row, extracted)
-                except Exception:
-                    # don't fail request on DB errors; log in real app
-                    pass
-
-    return {"query": q, "results": results, "searched": len(videos), "found": len(results)}
-
-
+@router.get('/search')
 @router.get('/giveaways')
-def list_giveaways():
-    """Return saved giveaways from the DB."""
-    if sync_engine is None:
-        return {"results": []}
+def search(q: str = Query('', max_length=200), page: int = Query(1, ge=1),
+           page_size: int = Query(20, ge=1, le=100), min_confidence: float = Query(0, ge=0, le=1),
+           availability: Literal['all', 'active', 'unknown', 'expired'] = 'all',
+           category: Category = 'all', sort: Literal['confidence', 'newest', 'deadline'] = 'confidence',
+           group_campaigns: bool = False, current_only: bool = False):
+    return db.list_index(get_engine(), q, page, page_size, min_confidence, availability, category, sort, group_campaigns, current_only)
 
-    from sqlmodel import select
-    from .db import Giveaway
 
-    with db.get_sync_session(sync_engine) as session:
-        stmt = select(Giveaway)
-        rows = session.exec(stmt).all()
-        results = []
-        for r in rows:
-            results.append({
-                "id": r.id,
-                "video_id": r.video_id,
-                "prizes": r.prizes,
-                "deadline": r.deadline,
-                "howto": r.howto,
-            })
-        return {"results": results}
+@router.get('/categories')
+def categories(current_only: bool = False):
+    return {'categories': db.category_counts(get_engine(), current_only)}
+
+
+@router.get('/promotions')
+def promotions(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100)):
+    return db.list_promotions(get_engine(), page, page_size)
+
+
+@router.get('/coverage')
+def coverage():
+    from .coverage import coverage_summary
+    return coverage_summary(get_engine())
+
+
+@router.get('/health')
+def health(request: Request):
+    with Session(get_engine()) as session:
+        videos = session.exec(select(func.count()).select_from(db.Video)).one()
+        giveaways = session.exec(select(func.count()).select_from(db.Giveaway)).one()
+    return {'status': 'ok', 'indexed_videos': videos, 'giveaways': giveaways,
+            'ingestion': {'enabled': getattr(request.app.state, 'ingestion_enabled', False),
+                          'running': getattr(request.app.state, 'ingestion_running', False),
+                          'last_report': getattr(request.app.state, 'ingestion_last_report', None)}}

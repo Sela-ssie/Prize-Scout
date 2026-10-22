@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: prizescout
+    runtime: docker
+    plan: 0.5c-512mb
+    numInstances: 1
+    healthCheckPath: /api/health
+    autoDeployTrigger: 'off'
+    disk:
+      name: scout-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DATABASE_URL
+        value: sqlite:////data/prizes.db
+      - key: HOST
+        value: 0.0.0.0
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: INGESTION_ENABLED
+        value: "1"
+      - key: WATCHLIST_PATH
+        value: config/watchlist.starter.json
+      - key: INGESTION_INTERVAL
+        value: "3600"
+      - key: INGESTION_MAX_UNITS
+        value: "100"
+      - key: INGESTION_DAILY_MAX_UNITS
+        value: "1000"
+      - key: INGESTION_MAX_PAGES
+        value: "1"
+      - key: INGESTION_TIMEOUT
+        value: "120"
